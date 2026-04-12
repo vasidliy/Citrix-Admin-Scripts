@@ -39,7 +39,46 @@ The script must be executed with user privileges (no administrator rights requir
 ## ⚙️ Customizing the Layout
 
 Edit `LayoutModification.xml` to change the pinned tiles or taskbar shortcuts.  
-**Important notes:**
+
+### Understanding the XML structure
+
+The Start menu layout is defined within the `<defaultlayout:StartLayout>` element. Tiles are placed on a **grid** where:
+
+- **`GroupCellWidth`** (on the `<defaultlayout:StartLayout>` element) defines the width of each tile group in **tile units**. The default value is `6`, meaning each group can accommodate up to 3 medium tiles (2×2) per row.
+- Each `<start:DesktopApplicationTile>` has the following key attributes:
+  - **`Size`**: tile dimensions. Common values:
+    - `2x2` – Medium tile (occupies 2 columns × 2 rows).
+    - `4x2` – Wide tile.
+    - `4x4` – Large tile.
+  - **`Column`** and **`Row`**: the **zero‑based** coordinates of the tile's **top‑left corner** within the group.
+  - **`DesktopApplicationLinkPath`** or **`DesktopApplicationID`**: specifies which application to launch.
+
+**Example interpretation**  
+The snippet below places a medium Outlook tile at the top‑left corner of the group:
+```xml
+<start:DesktopApplicationTile Size="2x2" Column="0" Row="0" DesktopApplicationLinkPath="%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Outlook.lnk" />
+```
+- **Column="0" Row="0"** → top‑left corner.
+- **Size="2x2"** → tile spans columns 0‑1 and rows 0‑1.
+
+### 📐 Visual grid representation of the provided example
+
+The table below shows how the tiles from the included `LayoutModification.xml` are arranged on a `GroupCellWidth="6"` grid.  
+**Column 0, Row 0 is the top‑left cell.** Each tile occupies a 2×2 block.
+
+| Row | Col 0 | Col 1 | Col 2 | Col 3 | Col 4 | Col 5 |
+|-----|-------|-------|-------|-------|-------|-------|
+| **0** | Outlook (0,0) 2x2 | Outlook (cont.) | Documents (2,0) 2x2 | Documents (cont.) | This PC (4,0) 2x2 | This PC (cont.) |
+| **1** | Outlook (cont.) | Outlook (cont.) | Documents (cont.) | Documents (cont.) | This PC (cont.) | This PC (cont.) |
+| **2** | Edge (0,2) 2x2 | Edge (cont.) | Firefox (2,2) 2x2 | Firefox (cont.) | IE (4,2) 2x2 | IE (cont.) |
+| **3** | Edge (cont.) | Edge (cont.) | Firefox (cont.) | Firefox (cont.) | IE (cont.) | IE (cont.) |
+| **4** | Excel (0,4) 2x2 | Excel (cont.) | PowerPoint (2,4) 2x2 | PowerPoint (cont.) | Word (4,4) 2x2 | Word (cont.) |
+| **5** | Excel (cont.) | Excel (cont.) | PowerPoint (cont.) | PowerPoint (cont.) | Word (cont.) | Word (cont.) |
+
+> **Note:** `(cont.)` indicates cells covered by the same 2×2 tile.  
+> For example, Outlook starts at `Column="0" Row="0"` and also occupies `(1,0)`, `(0,1)`, and `(1,1)`.
+
+### Important notes for customization
 - Use **DesktopApplicationLinkPath** with valid `.lnk` shortcuts that exist for all users (e.g., `%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\...`).
 - The script automatically creates a `Documents.lnk` shortcut in the user’s Start Menu Programs folder. If your layout references it, keep that step enabled.
 - Test the layout on a clean user profile before mass deployment.
