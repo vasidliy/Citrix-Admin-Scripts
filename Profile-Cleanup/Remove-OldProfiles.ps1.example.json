@@ -1,0 +1,74 @@
+{
+    "_comment_General": "Global script settings",
+    "GeneralSettings": {
+        "TestMode": false,
+        "LogDirectory": "Logs",
+        "LogRetentionDays": 30,
+        "ConsoleOutput": true,
+        "DetailedLogging": true
+    },
+    "_comment_AD": "Default Active Directory settings (used if not overridden per source)",
+    "ActiveDirectory": {
+        "Enabled": true,
+        "FQDNDomain": "ad.example.com",
+        "NetBIOSDomain": "EXAMPLE",
+        "ExcludeUsers": [
+            "Administrator",
+            "Guest",
+            "krbtgt"
+        ]
+    },
+    "_comment_Mail": "Email report settings (set Enabled to false if not needed)",
+    "MailSettings": {
+        "Enabled": true,
+        "SmtpServer": "smtp.example.com",
+        "Port": 25,
+        "UseSSL": false,
+        "Credentials": {
+            "UserName": "",
+            "Password": ""
+        },
+        "From": "profile-cleanup@example.com",
+        "To": [
+            "admin@example.com"
+        ],
+        "Subject": "[Report] Profile Cleanup"
+    },
+    "_comment_Sources": "List of profile shares to process",
+    "ProfileSources": [
+        {
+            "Name": "Example Citrix UPM Share",
+            "Enabled": true,
+            "ProfileRoot": "\\\\fs01.example.com\\Profiles",
+            "PatternProfile": "*",
+            "DaysToDelete": 365,
+            "EnableQuarantine": true,
+            "QuarantinePath": "\\\\fs01.example.com\\Quarantine",
+            "QuarantineDays": 14,
+            "ExcludeFolders": [
+                "Public",
+                "Default",
+                "Temp*",
+                "*.bak",
+                "!ThinAppCap",
+                "~snapshot"
+            ],
+            "EnableEmptyFolderCleanup": true,
+            "EmptyFolderExcludePatterns": [
+                "Public",
+                "Default",
+                "Temp*"
+            ],
+            "_comment_AD_override": "Per-source AD settings (optional, overrides global)",
+            "ActiveDirectory": {
+                "Enabled": true,
+                "FQDNDomain": "ad.example.com",
+                "NetBIOSDomain": "EXAMPLE",
+                "ExcludeUsers": [
+                    "Administrator",
+                    "Guest"
+                ]
+            }
+        }
+    ]
+}

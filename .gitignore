@@ -1,0 +1,91 @@
+# Custom exclude for local sensitive data (if you put real configs)
+# Remove these lines if you want to track example configs
+Profile-Cleanup/*.json
+!Profile-Cleanup/*.example.json
+
+# Logs and reports
+Logs/
+*.log
+ProfileCleanup_*.txt
+ProfileCleanup_*.html
+
+# Temporary files
+*.tmp
+*.temp
+*~
+*.bak
+*.old
+*.swp
+
+# PowerShell
+*.ps1.bak
+*.ps1.old
+*.psm1.bak
+*.psd1.bak
+*.ps1xml.bak
+*.clixml
+*.ps1.cache
+*.psd1.cache
+*.psm1.cache
+
+# Modules cache
+PSModuleCache/
+__pycache__/   # just in case
+
+# Windows / Explorer junk
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# User-specific files
+*.user
+*.userprefs
+*.suo
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.code-workspace
+
+# Secret files (if accidentally added)
+secrets.json
+credentials.json
+*.key
+*.pem
+*.crt
+*.pfx
+
+# Compiled executables
+*.exe
+*.dll
+*.msi
+
+# Archive files from testing
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+
+# Network drives mapping leftovers
+*.drive
+
+# Script output directories
+output/
+temp/
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+*.swp
+*.swo
+*~
+Icon?
+ehthumbs.db
+Thumbs.db
