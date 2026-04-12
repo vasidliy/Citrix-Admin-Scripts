@@ -78,6 +78,38 @@ The table below shows how the tiles from the included `LayoutModification.xml` a
 > **Note:** `(cont.)` indicates cells covered by the same 2×2 tile.  
 > For example, Outlook starts at `Column="0" Row="0"` and also occupies `(1,0)`, `(0,1)`, and `(1,1)`.
 
+### 📌 Taskbar pin list structure
+
+The taskbar shortcuts are defined inside the `<CustomTaskbarLayoutCollection>` section:
+
+```xml
+<CustomTaskbarLayoutCollection>
+    <defaultlayout:TaskbarLayout>
+        <taskbar:TaskbarPinList>
+            <taskbar:DesktopApp DesktopApplicationID="Microsoft.Windows.Explorer"/>
+            <taskbar:DesktopApp DesktopApplicationLinkPath="%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Outlook.lnk" />
+            <taskbar:DesktopApp DesktopApplicationLinkPath="%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Firefox.lnk" />
+            <taskbar:DesktopApp DesktopApplicationLinkPath="%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Microsoft Edge.lnk" />
+        </taskbar:TaskbarPinList>
+    </defaultlayout:TaskbarLayout>
+</CustomTaskbarLayoutCollection>
+```
+
+**How it works:**
+- Each `<taskbar:DesktopApp>` element pins **one application** to the taskbar.
+- The order of elements in the XML determines the **left‑to‑right order** on the taskbar.
+- You can use either:
+  - `DesktopApplicationID` – for built‑in Windows apps (File Explorer, Control Panel, etc.).
+  - `DesktopApplicationLinkPath` – for any `.lnk` shortcut file (usually located in `%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\`).
+
+**Example taskbar order (as shown above):**
+1. File Explorer (`Microsoft.Windows.Explorer`)
+2. Outlook
+3. Firefox
+4. Microsoft Edge
+
+> **Note:** The user can later unpin or rearrange these icons. This layout is applied only **once** (on first logon).
+
 ### Important notes for customization
 - Use **DesktopApplicationLinkPath** with valid `.lnk` shortcuts that exist for all users (e.g., `%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\...`).
 - The script automatically creates a `Documents.lnk` shortcut in the user’s Start Menu Programs folder. If your layout references it, keep that step enabled.
