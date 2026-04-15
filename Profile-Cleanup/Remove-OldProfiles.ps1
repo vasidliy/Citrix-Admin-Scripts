@@ -174,6 +174,7 @@ if ($TestMode) {
     "REAL MODE - RESULTS:`n"
     "Moved profiles: $($Stats.ProfilesMovedSuccess)/$($Stats.ProfilesToMoveCount) (success/total)"
     "Deleted profiles: $($Stats.ProfilesDeletedSuccess)/$($Stats.ProfilesToDeleteCount) (success/total)"
+    "  * Quarantine cleanup: $($stats.OldQuarantineProfiles) profiles removed"
     "  * By age: $($Stats.ProfilesToMoveByAge)"
     "  * By AD status: $($Stats.ProfilesToMoveByAD)"
     "  * By corruption: $($Stats.ProfilesToMoveByCorruption)"
@@ -508,6 +509,15 @@ function Move-ProfileToQuarantine {
 
         # Verify that the source folder is gone and the destination exists
         if (Test-Path $DestinationPath) {
+            # Update LastWriteTime to current time so quarantine period starts now
+            try {
+                (Get-Item -LiteralPath $DestinationPath).LastWriteTime = Get-Date
+                Write-Log "Updated LastWriteTime of quarantine folder to current time" -Level "DEBUG"
+            }
+            catch {
+                Write-Log "Warning: Failed to update LastWriteTime of $DestinationPath : $_" -Level "WARN"
+            }
+
             Write-Log "Profile successfully moved" -Level "INFO"
             return $true
         }
@@ -576,7 +586,11 @@ function Remove-Profile {
 
 # ========== QUARANTINE CLEANUP FUNCTION ==========
 function Clear-OldQuarantine {
-    param([string]$QuarantinePath, [int]$QuarantineDays)
+    param(
+        [string]$QuarantinePath,
+        [int]$QuarantineDays,
+        [string]$SourceName   # Added to link action to source in report
+    )
     
     if (-not (Test-Path $QuarantinePath)) {
         Write-Log "Quarantine folder does not exist: $QuarantinePath" -Level "DEBUG"
@@ -592,17 +606,68 @@ function Clear-OldQuarantine {
         Write-Log "Found profiles in quarantine older than $QuarantineDays days: $count" -Level "INFO"
         
         foreach ($userProfile in $oldProfiles) {
+            $profileName = $userProfile.Name
+            $profileFullPath = $userProfile.FullName
             try {
                 if ($TestMode) {
-                    Write-Log "TEST: Profile would be deleted from quarantine: $($userProfile.Name)" -Level "INFO"
+                    Write-Log "TEST: Profile would be deleted from quarantine: $profileName" -Level "INFO"
+                    $status = "TEST"
                 }
                 else {
-                    Remove-Item -Path $userProfile.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                    Write-Log "Deleted old profile from quarantine: $($userProfile.Name)" -Level "INFO"
+                    # Build long path prefix to support paths > 260 chars and special characters
+                    $longPath = $profileFullPath
+                    if ($profileFullPath.StartsWith('\\')) {
+                        # UNC path: \\server\share\...  ->  \\?\UNC\server\share\...
+                        $longPath = '\\?\UNC\' + $profileFullPath.Substring(2)
+                    }
+                    else {
+                        # Local path: C:\Folder\...  ->  \\?\C:\Folder\...
+                        $longPath = '\\?\' + $profileFullPath
+                    }
+
+                    # Use Remove-Item with -LiteralPath to avoid wildcard interpretation and support long paths
+                    Remove-Item -LiteralPath $longPath -Recurse -Force -ErrorAction Stop
+
+                    Write-Log "Deleted old profile from quarantine: $profileName" -Level "INFO"
+                    $status = "SUCCESS"
                 }
+                
+                # Add to execution details for HTML report
+                $detail = [PSCustomObject]@{
+                    Source       = $SourceName
+                    UserName     = ""                       # Not applicable for quarantine cleanup
+                    ProfileName  = $profileName
+                    ProfileType  = "Quarantine"
+                    Reason       = "OLD_QUARANTINE"
+                    Details      = "Older than $QuarantineDays days"
+                    Action       = "DELETE"
+                    Destination  = "N/A"
+                    Status       = $status
+                    ErrorMessage = $null
+                }
+                $executionDetails.Add($detail)
+                
+                # Increment global stats counter
+                $script:stats.OldQuarantineProfiles++
             }
             catch {
-                Write-Log "Error deleting profile from quarantine: $($userProfile.Name)" -Level "WARN"
+                Write-Log "Error deleting profile from quarantine: $profileName - $_" -Level "WARN"
+                if (-not $TestMode) {
+                    $detail = [PSCustomObject]@{
+                        Source       = $SourceName
+                        UserName     = ""
+                        ProfileName  = $profileName
+                        ProfileType  = "Quarantine"
+                        Reason       = "OLD_QUARANTINE"
+                        Details      = "Older than $QuarantineDays days"
+                        Action       = "DELETE"
+                        Destination  = "N/A"
+                        Status       = "FAILED"
+                        ErrorMessage = $_.Exception.Message
+                    }
+                    $executionDetails.Add($detail)
+                    $script:stats.OldQuarantineProfiles++
+                }
             }
         }
     }
@@ -740,8 +805,7 @@ foreach ($source in $userProfileSources) {
         }
         
         $userFolders = Get-ChildItem -Path $source.ProfileRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { ($_.Name -like $source.PatternProfile) -and ($_.FullName -notlike "$($source.QuarantinePath)*") } | Select-Object -First 200
-        
+        Where-Object { ($_.Name -like $source.PatternProfile) -and ($_.FullName -notlike "$($source.QuarantinePath)*") }
         # Apply ExcludeFolders exclusions
         if ($source.ExcludeFolders -and $source.ExcludeFolders.Count -gt 0) {
             $userFolders = $userFolders | Where-Object {
@@ -890,14 +954,13 @@ foreach ($source in $userProfileSources) {
                     $destinationPath = $null
                     if ($action -eq "MOVE") {
                         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-                        $safeUserName = $userName -replace '[\\/:*?"<>|]', '_'
                         $safeProfileName = $userProfileName -replace '[\\/:*?"<>|]', '_'
                         
                         if ($userProfileType -eq "ResetCitrixProfile") {
-                            $quarantineFolder = "RESET_${safeUserName}_${safeProfileName}_${timestamp}"
+                            $quarantineFolder = "RESET_${safeProfileName}_${timestamp}"
                         }
                         else {
-                            $quarantineFolder = "${safeUserName}_${safeProfileName}_${userProfileType}_${timestamp}_${moveReason}"
+                            $quarantineFolder = "${safeProfileName}_${userProfileType}_${timestamp}_${moveReason}"
                         }
                         
                         $destinationPath = Join-Path $source.QuarantinePath $quarantineFolder
@@ -981,7 +1044,7 @@ foreach ($source in $userProfileSources) {
         
         # Clean up old quarantine (only if quarantine is enabled and path exists)
         if ($enableQuarantine) {
-            Clear-OldQuarantine -QuarantinePath $source.QuarantinePath -QuarantineDays $source.QuarantineDays
+            Clear-OldQuarantine -QuarantinePath $source.QuarantinePath -QuarantineDays $source.QuarantineDays -SourceName $source.Name
         }
         
         # Delete empty folders if enabled
@@ -1074,6 +1137,7 @@ if ($TestMode) {
 else {
     Write-Log "Moved profiles: $($stats.ProfilesMovedSuccess)/$($stats.ProfilesToMoveCount) (success/total)" -Level "INFO"
     Write-Log "Deleted profiles: $($stats.ProfilesDeletedSuccess)/$($stats.ProfilesToDeleteCount) (success/total)" -Level "INFO"
+    Write-Log "Quarantine cleanup: $($stats.OldQuarantineProfiles) profiles removed"
     Write-Log "  - by age: $($stats.ProfilesToMoveByAge)" -Level "INFO"
     Write-Log "  - by AD status: $($stats.ProfilesToMoveByAD)" -Level "INFO"
     Write-Log "  - by corruption: $($stats.ProfilesToMoveByCorruption)" -Level "INFO"
@@ -1117,6 +1181,7 @@ if ($TestMode) {
     "REAL MODE - RESULTS:`n"
     "Moved profiles: $($stats.ProfilesMovedSuccess)/$($stats.ProfilesToMoveCount) (success/total)"
     "Deleted profiles: $($stats.ProfilesDeletedSuccess)/$($stats.ProfilesToDeleteCount) (success/total)"
+    "  * Quarantine cleanup: $($stats.OldQuarantineProfiles) profiles removed"
     "  * By age: $($stats.ProfilesToMoveByAge)"
     "  * By AD status: $($stats.ProfilesToMoveByAD)"
     "  * By corruption: $($stats.ProfilesToMoveByCorruption)"
