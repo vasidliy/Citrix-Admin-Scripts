@@ -729,7 +729,7 @@ foreach ($source in $userProfileSources) {
         }
         
         $userFolders = Get-ChildItem -Path $source.ProfileRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { ($_.Name -like $source.PatternProfile) -and ($_.FullName -notlike "$($source.QuarantinePath)*") } | Select-Object -First 200
+        Where-Object { ($_.Name -like $source.PatternProfile) -and ($_.FullName -notlike "$($source.QuarantinePath)*") }
         
         # Apply ExcludeFolders exclusions
         if ($source.ExcludeFolders -and $source.ExcludeFolders.Count -gt 0) {
