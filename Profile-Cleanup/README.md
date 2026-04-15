@@ -63,13 +63,13 @@ The script uses a JSON configuration file. Below is an example with explanations
     },
     "ProfileSources": [
         {
-            "Name": "srt-ctxshare",
+            "Name": "fserver01",
             "Enabled": true,
-            "ProfileRoot": "\\\\fs-server01.company.com\\Profiles",
+            "ProfileRoot": "\\\\fserver01\\Profiles",
             "PatternProfile": "*",            // wildcard for user folders
             "DaysToDelete": 365,              // inactivity threshold (days)
             "EnableQuarantine": false,        // if false, profiles are deleted directly
-            "QuarantinePath": "\\\\fs-server01.company.com\\Profiles\\Pending",
+            "QuarantinePath": "\\\\fserver01\\Profiles\\Pending",
             "QuarantineDays": 14,             // auto‑delete from quarantine after N days
             "ExcludeFolders": [               // folders to ignore (wildcards allowed)
                 "Public", "Default", "Temp*", "*.bak", "!ThinAppCap", "~snapshot"

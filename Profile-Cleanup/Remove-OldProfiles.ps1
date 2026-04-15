@@ -525,35 +525,46 @@ function Move-ProfileToQuarantine {
 # ========== PROFILE DELETE FUNCTION ==========
 function Remove-Profile {
     param(
-        [string]$userProfilePath,
-        [string]$userProfileType,
+        [string]$UserProfilePath,
+        [string]$UserProfileType,
         [string]$Reason
     )
 
     try {
         if ($TestMode) {
-            Write-Log "TEST: Profile [$userProfileType] would be deleted: $userProfilePath (reason: $Reason)" -Level "INFO"
+            Write-Log "TEST: Profile [$UserProfileType] would be deleted: $UserProfilePath (reason: $Reason)" -Level "INFO"
             return $true
         }
 
-        Write-Log "Deleting [$userProfileType]: $userProfilePath (reason: $Reason)" -Level "INFO"
+        Write-Log "Deleting [$UserProfileType]: $UserProfilePath (reason: $Reason)" -Level "INFO"
 
-        # Check if the folder exists
-        if (-not (Test-Path $userProfilePath)) {
-            Write-Log "Profile folder does not exist: $userProfilePath" -Level "WARN"
-            return $true  # consider success because it's already gone
+        # Check if the folder still exists
+        if (-not (Test-Path -LiteralPath $UserProfilePath)) {
+            Write-Log "Profile folder does not exist: $UserProfilePath" -Level "WARN"
+            return $true
         }
 
-        # Delete the folder recursively
-        Remove-Item -Path $userProfilePath -Recurse -Force -ErrorAction Stop
+        # Build long path prefix for Remove-Item to handle paths > 260 chars
+        $longPath = $UserProfilePath
+        if ($UserProfilePath.StartsWith('\\')) {
+            # UNC path: \\server\share\...  ->  \\?\UNC\server\share\...
+            $longPath = '\\?\UNC\' + $UserProfilePath.Substring(2)
+        }
+        else {
+            # Local path: C:\Folder\...  ->  \\?\C:\Folder\...
+            $longPath = '\\?\' + $UserProfilePath
+        }
+
+        # Use Remove-Item with -LiteralPath to avoid wildcard interpretation and support long paths
+        Remove-Item -LiteralPath $longPath -Recurse -Force -ErrorAction Stop
 
         # Verify deletion
-        if (-not (Test-Path $userProfilePath)) {
+        if (-not (Test-Path -LiteralPath $UserProfilePath)) {
             Write-Log "Profile successfully deleted" -Level "INFO"
             return $true
         }
         else {
-            Write-Log "ERROR: After deletion, folder still exists: $userProfilePath" -Level "ERROR"
+            Write-Log "ERROR: After deletion, folder still exists: $UserProfilePath" -Level "ERROR"
             return $false
         }
     }
@@ -729,7 +740,7 @@ foreach ($source in $userProfileSources) {
         }
         
         $userFolders = Get-ChildItem -Path $source.ProfileRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { ($_.Name -like $source.PatternProfile) -and ($_.FullName -notlike "$($source.QuarantinePath)*") }
+        Where-Object { ($_.Name -like $source.PatternProfile) -and ($_.FullName -notlike "$($source.QuarantinePath)*") } | Select-Object -First 200
         
         # Apply ExcludeFolders exclusions
         if ($source.ExcludeFolders -and $source.ExcludeFolders.Count -gt 0) {
@@ -931,7 +942,7 @@ foreach ($source in $userProfileSources) {
                             $null = Move-ProfileToQuarantine -SourcePath $userProfile.Path -DestinationPath $destinationPath -ProfileType $userProfileType -Reason $moveReason
                         }
                         else {
-                            $null = Remove-Profile -ProfilePath $userProfile.Path -ProfileType $userProfileType -Reason $moveReason
+                            $null = Remove-Profile -UserProfilePath $userProfile.Path -UserProfileType $userProfileType -Reason $moveReason
                         }
                     }
                     else {
@@ -949,7 +960,7 @@ foreach ($source in $userProfileSources) {
                             }
                         }
                         else {
-                            $removed = Remove-Profile -ProfilePath $userProfile.Path -ProfileType $userProfileType -Reason $moveReason
+                            $removed = Remove-Profile -UserProfilePath $userProfile.Path -UserProfileType $userProfileType -Reason $moveReason
                             if ($removed) {
                                 $detail.Status = "SUCCESS"
                                 $stats.ProfilesDeletedSuccess++
