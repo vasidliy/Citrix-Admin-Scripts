@@ -1,19 +1,22 @@
 # Remove-OldProfiles.ps1
 
-A powerful PowerShell script to automatically clean up old, corrupted, or orphaned user profiles (Citrix UPM, Microsoft Roaming, and reset profiles) from network shares. It supports test mode, quarantine, Active Directory integration, detailed logging, and email reports.
+A powerful PowerShell script to automatically clean up old, corrupted, or orphaned user profiles (Citrix UPM, Microsoft Roaming, and reset profiles) from network shares. It supports test mode, quarantine, Active Directory integration, folder redirection handling, detailed logging, and email reports.
 
 ## Features
 
-- **Profile type detection** – correctly identifies Citrix UPM, Microsoft Roaming, and reset (upm_*) profiles.
+- **Profile type detection** – correctly identifies Citrix UPM, Microsoft Roaming, and reset (`upm_*`) profiles.
 - **Health check** – validates `NTUSER.DAT` existence and size (optional).
 - **Age-based cleanup** – deletes/moves profiles that have not been used for a configurable number of days.
 - **Active Directory integration** – checks if a user account exists and is enabled; can process per‑source AD domains.
 - **Quarantine** – moves profiles to a separate folder instead of deleting them immediately; old quarantine items are automatically removed after a set period.
 - **Empty folder cleanup** – removes empty user folders after profile deletion (with exclusion patterns).
+- **Folder Redirection (FR) support** – optionally processes redirected folders (Documents, Desktop, etc.) associated with a user when their profile is removed.
+- **Orphaned FR handling** – detects and optionally cleans up redirected folders left behind when a profile no longer exists, with configurable modes (report only, delete/move).
 - **Test mode** – dry‑run mode that only logs what would be done, without making any changes.
 - **Email reporting** – sends a summary report (text and optional HTML) with attached log files.
 - **Detailed logging** – writes to a rotating log file with configurable retention.
 - **Multi‑source support** – can process multiple profile shares with different settings.
+- **Long path support** – handles paths longer than 260 characters and special characters (e.g., `%3A`) using `\\?\UNC\` prefix.
 
 ## Requirements
 
@@ -83,7 +86,12 @@ The script uses a JSON configuration file. Below is an example with explanations
                 "FQDNDomain": "domain.company.com",
                 "NetBIOSDomain": "DOMAIN",
                 "ExcludeUsers": [ "Administrator", "Guest" ]
-            }
+            },
+            "FolderRedirectionPaths": [        // optional: paths where redirected folders reside
+                "\\\\fserver01\\FR01",
+                "\\\\fserver01\\FR02"
+            ],
+            "ProcessOrphanedFR": "ReportOnly"  // optional: "Disabled" (default), "ReportOnly", "Delete"
         }
     ]
 }
@@ -102,12 +110,15 @@ The script uses a JSON configuration file. Below is an example with explanations
 | `EnableEmptyFolderCleanup` | If `true`, removes empty user folders after all profiles inside have been processed. |
 | `EmptyFolderExcludePatterns` | Patterns to exclude from empty folder cleanup (if not set, falls back to `ExcludeFolders`). |
 | `ActiveDirectory` (per source) | Optional per‑source AD settings. If missing, the global `ActiveDirectory` section is used. |
+| `FolderRedirectionPaths` | **New**: An array of UNC paths to root folders containing redirected user data (e.g., `\\server\FR01`). When a user's profile is cleaned up, the script will also move/delete their subfolder under each specified path (if it exists). |
+| `ProcessOrphanedFR` | **New**: Controls how orphaned Folder Redirection folders are handled. <br/> - `"Disabled"` (default): ignore orphaned FR folders. <br/> - `"ReportOnly"`: detect and log orphaned FR folders (visible in reports), but take no action. <br/> - `"Delete"`: move/delete orphaned FR folders (according to `EnableQuarantine`). <br/> This setting also accepts boolean values (`true` = `"Delete"`, `false` = `"Disabled"`) for backward compatibility. |
 
 ## How It Works
 
 1. **Load configuration** – reads the JSON file.
 2. **For each enabled profile source**:
    - Scan `ProfileRoot` for folders matching `PatternProfile`, excluding `ExcludeFolders` and the quarantine folder itself.
+   - Also **exclude** any subfolders that reside under a path listed in `FolderRedirectionPaths` (prevents treating redirected folders as profile folders).
    - For each user folder, call `Find-UserProfiles` to detect one or more profiles inside:
      - `CitrixUPM` – contains `UPM_Profile` folder or `UPMSettings.ini`.
      - `MicrosoftRoaming` – contains `NTUSER.DAT` or `AppData`/`Desktop`.
@@ -119,14 +130,20 @@ The script uses a JSON configuration file. Below is an example with explanations
      - **AD status** – user not found or disabled → `USER_NOT_FOUND` / `USER_DISABLED`
      - **Reset profiles** – always moved/deleted (reason `RESET_PROFILE`)
    - If a reason exists, the profile is either **moved to quarantine** (if `EnableQuarantine = true`) or **deleted**.
-3. **Cleanup**:
-   - Remove old profiles from quarantine older than `QuarantineDays`.
-   - Delete empty user folders (if enabled).
-4. **Logging & Reporting**:
+3. **Folder Redirection handling**:
+   - If the user had any profile action taken, the script will also process their subfolders under each `FolderRedirectionPaths` entry (move or delete according to `EnableQuarantine`).
+4. **Orphaned Folder Redirection cleanup**:
+   - After processing all user folders, the script examines each `FolderRedirectionPaths` root for subfolders whose names do **not** correspond to any user folder found in `ProfileRoot`.
+   - Action is taken based on `ProcessOrphanedFR`:
+     - `"ReportOnly"` – adds entries to the report with status `REPORTED` but performs no file operations.
+     - `"Delete"` – moves/deletes the orphaned folders (respecting `EnableQuarantine`).
+5. **Quarantine cleanup** – removes old profiles from quarantine older than `QuarantineDays`.
+6. **Empty folder cleanup** – deletes empty user folders (if enabled).
+7. **Logging & Reporting**:
    - Write detailed logs to `LogDirectory`.
    - Generate a text report and an optional HTML report with a table of actions.
    - Send an email summary if `MailSettings.Enabled = true`.
-5. **Log rotation** – deletes log files older than `LogRetentionDays`.
+8. **Log rotation** – deletes log files older than `LogRetentionDays`.
 
 ## Usage
 
@@ -147,7 +164,7 @@ The script uses a JSON configuration file. Below is an example with explanations
 Set `"TestMode": true` in the JSON file, or temporarily change it. In test mode the script will:
 
 - Log all actions as `[TEST]`
-- Show which profiles would be moved/deleted
+- Show which profiles (and FR folders) would be moved/deleted
 - **Not** modify any files or folders
 
 Always run in test mode first to verify the configuration.
@@ -167,13 +184,47 @@ To disable AD checks for a source, set `"ActiveDirectory.Enabled": false` (or gl
 
 Quarantine is a safety mechanism. Instead of deleting a profile immediately, the script moves it to a dedicated folder (e.g., `Pending`). This allows you to recover profiles if needed. The quarantine folder is automatically cleaned of entries older than `QuarantineDays`.
 
+**Important:** When a profile is moved to quarantine, its `LastWriteTime` is updated to the current time. This ensures that the quarantine aging starts from the moment the profile was moved, not from the original last write time.
+
 If you set `"EnableQuarantine": false`, profiles are deleted directly – use with caution.
+
+## Folder Redirection (FR) Support
+
+Many environments use Folder Redirection to store user data (Documents, Desktop, etc.) in separate network locations. This script can handle those folders alongside user profiles.
+
+### Configuration
+
+1. Add `"FolderRedirectionPaths"` array to each `ProfileSources` entry, containing the root UNC paths of your redirected folders (e.g., `\\server\Redirected\Documents`).
+2. When a user's profile is cleaned up, the script will also process the corresponding subfolder under each of these roots (if it exists).
+
+### Orphaned FR Handling
+
+Sometimes a user profile is deleted manually, leaving behind orphaned redirected folders. The `ProcessOrphanedFR` setting controls what happens to them:
+
+- `"Disabled"` – do nothing.
+- `"ReportOnly"` – detect and log orphaned folders (visible in HTML reports with status `REPORTED`), but do not modify them. Useful for auditing before enabling actual cleanup.
+- `"Delete"` – move/delete orphaned folders according to `EnableQuarantine`.
+
+### Example
+
+If you have two redirected folder shares:
+
+```json
+"FolderRedirectionPaths": [
+    "\\\\fs\\Redirected\\Documents",
+    "\\\\fs\\Redirected\\Desktop"
+]
+```
+
+For a user `jdoe` whose profile is being cleaned up, the script will process:
+- `\\fs\\Redirected\\Documents\\jdoe`
+- `\\fs\\Redirected\\Desktop\\jdoe`
 
 ## Email Reports
 
 The script can send an email report after execution. The report includes:
 
-- Summary statistics (number of profiles found, moved, deleted, etc.)
+- Summary statistics (number of profiles found, moved, deleted, FR moved/deleted, orphaned FR counts, etc.)
 - List of processed sources
 - Attachments: text report, HTML report (if any profiles were processed), and the log file
 
@@ -212,6 +263,15 @@ Old logs are automatically deleted after `LogRetentionDays`.
 
 Set `"TestMode": true` in `GeneralSettings` and run the script. Review the logs and the HTML report to see what would happen.
 
+### 4. Handle Folder Redirection and report orphaned folders
+
+```json
+"FolderRedirectionPaths": [ "\\\\fs\\Redirected\\Documents" ],
+"ProcessOrphanedFR": "ReportOnly"
+```
+
+After verifying the report, you can change to `"Delete"` to actually clean up orphaned FR folders.
+
 ## Troubleshooting
 
 | Issue | Possible solution |
@@ -221,6 +281,8 @@ Set `"TestMode": true` in `GeneralSettings` and run the script. Review the logs 
 | Profiles are not being detected | Check `PatternProfile` and `ExcludeFolders`. Enable `DetailedLogging` to see why folders are skipped. |
 | Email not sent | Confirm SMTP server, port, and firewall settings. Check credentials if required. |
 | Quarantine folder not created | The script creates the folder automatically if it does not exist. Ensure the parent path is accessible. |
+| Long path errors | The script now uses `\\?\UNC\` prefix for all move/delete operations, which should handle paths up to 32,767 characters. Ensure the account has proper permissions. |
+| Orphaned FR folders not being processed | Verify that `ProcessOrphanedFR` is not set to `"Disabled"` and that the user names in `FolderRedirectionPaths` match the normalized names extracted from profile folders. |
 
 ## Best Practices
 
@@ -228,6 +290,7 @@ Set `"TestMode": true` in `GeneralSettings` and run the script. Review the logs 
 - Use a dedicated service account with least privilege (read/write on profile shares, read-only for AD).
 - Regularly review logs and quarantine folders.
 - Consider scheduling the script via Task Scheduler with appropriate credentials.
+- For large environments, adjust `Select-Object -First 200` in the script if you need to process more than 200 user folders per source (modify the script accordingly).
 
 ## License
 
