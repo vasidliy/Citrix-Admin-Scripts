@@ -175,6 +175,7 @@ if ($TestMode) {
     "  * To move: $($Stats.FolderRedirectionToMoveCount)"
     "  * To delete: $($Stats.FolderRedirectionToDeleteCount)"
     "  * Orphaned reported: $($Stats.OrphanedFRReportedCount)`n"
+    "Empty folders to delete: $($Stats.EmptyFolders)`n"
 } else {
     "REAL MODE - RESULTS:`n"
     "Moved profiles: $($Stats.ProfilesMovedSuccess)/$($Stats.ProfilesToMoveCount) (success/total)"
@@ -193,6 +194,7 @@ if ($TestMode) {
     "  * Orphaned reported only: $($Stats.OrphanedFRReportedCount)"
     "  * Move errors: $($Stats.FolderRedirectionMoveFailed)"
     "  * Delete errors: $($Stats.FolderRedirectionDeleteFailed)`n"
+    "Empty folders deleted: $($Stats.EmptyFolders)`n"
 }
 )
 
@@ -1011,11 +1013,13 @@ function Remove-EmptyFolders {
         if (-not $items) {
             if ($TestMode) {
                 Write-Log "TEST: Empty folder would be deleted: $($subFolder.FullName)" -Level "INFO"
+                $script:stats.EmptyFolders++
             }
             else {
                 try {
                     Remove-Item -Path $subFolder.FullName -Force -ErrorAction SilentlyContinue
                     Write-Log "Deleted empty folder: $($subFolder.FullName)" -Level "INFO"
+                    $script:stats.EmptyFolders++
                 }
                 catch {
                     Write-Log "Could not delete empty folder $($subFolder.FullName): $_" -Level "WARN"
@@ -1685,6 +1689,7 @@ if ($TestMode) {
     Write-Log "  Profiles to move/delete: $($stats.ProfilesToMoveCount) / $($stats.ProfilesToDeleteCount)" -Level "INFO"
     Write-Log "  FR to move/delete      : $($stats.FolderRedirectionToMoveCount) / $($stats.FolderRedirectionToDeleteCount)" -Level "INFO"
     Write-Log "  Orphaned FR reported   : $($stats.OrphanedFRReportedCount)" -Level "INFO"
+    Write-Log "  Empty folders to delete: $($stats.EmptyFolders)" -Level "INFO"
 }
 else {
     $profMoveStr = Format-Count -Success $stats.ProfilesMovedSuccess -Total $stats.ProfilesToMoveCount
@@ -1695,6 +1700,7 @@ else {
     Write-Log "  FR moved/deleted       : $frMoveStr / $frDelStr" -Level "INFO"
     Write-Log "  Orphaned FR processed  : $($stats.OrphanedFRProcessedCount)" -Level "INFO"
     Write-Log "  Quarantine cleaned     : $($stats.OldQuarantineProfiles)" -Level "INFO"
+    Write-Log "  Empty folders deleted  : $($stats.EmptyFolders)" -Level "INFO"
 }
 Write-Log "" -Level "INFO"
 
@@ -1751,6 +1757,7 @@ if ($TestMode) {
 Profiles to move/delete: $($stats.ProfilesToMoveCount) / $($stats.ProfilesToDeleteCount)
 FR to move/delete      : $($stats.FolderRedirectionToMoveCount) / $($stats.FolderRedirectionToDeleteCount)
 Orphaned FR reported   : $($stats.OrphanedFRReportedCount)
+Empty folders to delete: $($stats.EmptyFolders)
 "@
 } else {
 @"
@@ -1758,6 +1765,7 @@ Profiles moved/deleted : $(Format-Count -Success $stats.ProfilesMovedSuccess -To
 FR moved/deleted       : $(Format-Count -Success $stats.FolderRedirectionMovedSuccess -Total $stats.FolderRedirectionToMoveCount) / $(Format-Count -Success $stats.FolderRedirectionDeletedSuccess -Total $stats.FolderRedirectionToDeleteCount)
 Orphaned FR processed  : $($stats.OrphanedFRProcessedCount)
 Quarantine cleaned     : $($stats.OldQuarantineProfiles)
+Empty folders deleted  : $($stats.EmptyFolders)
 "@
 }
 )
