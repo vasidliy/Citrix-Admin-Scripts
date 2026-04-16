@@ -39,25 +39,26 @@
         {
             "Name": "Example Citrix UPM Share",
             "Enabled": true,
-            "ProfileRoot": "\\\\fs01.example.com\\Profiles",
+            "ProfileRoot": "\\\\fs01\\Profiles",
             "PatternProfile": "*",
             "DaysToDelete": 365,
             "EnableQuarantine": true,
-            "QuarantinePath": "\\\\fs01.example.com\\Quarantine",
+            "QuarantinePath": "\\\\fs01\\Quarantine",
             "QuarantineDays": 14,
             "ExcludeFolders": [
                 "Public",
                 "Default",
                 "Temp*",
                 "*.bak",
-                "!ThinAppCap",
                 "~snapshot"
             ],
             "EnableEmptyFolderCleanup": true,
             "EmptyFolderExcludePatterns": [
                 "Public",
                 "Default",
-                "Temp*"
+                "Temp*",
+                "FR01",
+                "FR02"
             ],
             "_comment_AD_override": "Per-source AD settings (optional, overrides global)",
             "ActiveDirectory": {
@@ -68,7 +69,17 @@
                     "Administrator",
                     "Guest"
                 ]
-            }
+            },
+            "_comment_FR": "Folder Redirection settings (optional)",
+            "FolderRedirectionPaths": [
+                "\\\\fs01\\Profiles\\FR01",
+                "\\\\fs01\\Profiles\\FR02"
+            ],
+            "FolderRedirectionExcludePatterns": [
+                "!Containers",
+                "!System"
+            ],
+            "ProcessOrphanedFR": "ReportOnly"
         }
     ]
 }

@@ -10,7 +10,8 @@
     This script scans user profile folders (Citrix UPM, Microsoft Roaming, reset profiles),
     checks profile health (NTUSER.DAT), verifies user status in Active Directory,
     and moves/deletes old or invalid profiles according to the configuration.
-    It supports quarantine, empty folder cleanup, and detailed logging.
+    It supports quarantine, empty folder cleanup, folder redirection handling,
+    and detailed logging.
 
 .PARAMETER ConfigFile
     Path to the JSON configuration file. Default: "Remove-OldProfiles.ps1.json" in the script directory.
@@ -607,7 +608,7 @@ function Remove-Profile {
     }
 }
 
-# ========== FOLDER REDIRECTION MOVE FUNCTION ==========
+# ========== FOLDER REDIRECTION MOVE FUNCTION (using robocopy for reliability) ==========
 function Move-FolderRedirectionToQuarantine {
     param(
         [string]$SourcePath,
@@ -631,20 +632,47 @@ function Move-FolderRedirectionToQuarantine {
             Write-Log "Created quarantine folder: $quarantineRoot" -Level "INFO"
         }
 
-        # Build long path prefix for Move-Item
-        $longSource = $SourcePath
-        $longDest = $DestinationPath
-        if ($SourcePath.StartsWith('\\')) {
-            $longSource = '\\?\UNC\' + $SourcePath.Substring(2)
-            $longDest = '\\?\UNC\' + $DestinationPath.Substring(2)
-        }
-        else {
-            $longSource = '\\?\' + $SourcePath
-            $longDest = '\\?\' + $DestinationPath
+        # Use robocopy to move the folder contents
+        $robocopyArgs = @(
+            "`"$SourcePath`"",
+            "`"$DestinationPath`"",
+            "/E",        # copy subdirectories, including empty ones
+            "/MOV",      # move files (delete from source after copying)
+            "/R:3",      # retry 3 times on failure
+            "/W:5",      # wait 5 seconds between retries
+            "/NP",       # no progress
+            "/NJH",      # no job header
+            "/NJS"       # no job summary
+        )
+
+        Write-Log "Executing: robocopy $($robocopyArgs -join ' ')" -Level "DEBUG"
+        $result = & robocopy @robocopyArgs 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Robocopy exit codes 0-7 are considered success (some changes made)
+        if ($exitCode -ge 8) {
+            throw "Robocopy failed with exit code $exitCode. Output: $result"
         }
 
-        # Move the folder
-        Move-Item -LiteralPath $longSource -Destination $longDest -Force -ErrorAction Stop
+        # Clean up any remaining items in the source folder (hidden/system files)
+        if (Test-Path $SourcePath) {
+            try {
+                Write-Log "Cleaning up remaining items in source folder: $SourcePath" -Level "DEBUG"
+                # Build long path prefix for Remove-Item
+                $longSourcePath = if ($SourcePath.StartsWith('\\')) {
+                    '\\?\UNC\' + $SourcePath.Substring(2)
+                }
+                else {
+                    '\\?\' + $SourcePath
+                }
+                Remove-Item -LiteralPath $longSourcePath -Recurse -Force -ErrorAction Stop
+                Write-Log "Source folder successfully removed" -Level "DEBUG"
+            }
+            catch {
+                Write-Log "Warning: Could not delete source folder '$SourcePath' after forced cleanup: $_" -Level "WARN"
+                # Not a fatal error
+            }
+        }
 
         if (Test-Path $DestinationPath) {
             # Update LastWriteTime to current time for proper quarantine aging
@@ -817,7 +845,8 @@ function Clear-OrphanedFolderRedirection {
         [bool]$EnableQuarantine,
         [string]$SourceName,
         [hashtable]$FoundUsers,      # usernames that have a corresponding profile folder
-        [string]$ProcessOrphanedFR   # "Disabled", "ReportOnly", or "Delete"
+        [string]$ProcessOrphanedFR,  # "Disabled", "ReportOnly", or "Delete"
+        [string[]]$ExcludePatterns   # patterns to exclude specific subfolders inside FR
     )
 
     if ($ProcessOrphanedFR -eq "Disabled") {
@@ -836,6 +865,20 @@ function Clear-OrphanedFolderRedirection {
         $frSubFolders = Get-ChildItem -Path $frPath -Directory -ErrorAction SilentlyContinue
         foreach ($frSubFolder in $frSubFolders) {
             $userName = $frSubFolder.Name
+
+            # Skip if the subfolder name matches any FR exclude pattern
+            $skip = $false
+            if ($ExcludePatterns -and $ExcludePatterns.Count -gt 0) {
+                foreach ($pattern in $ExcludePatterns) {
+                    if ($userName -like $pattern) {
+                        Write-Log "Skipping excluded orphaned FR folder: $($frSubFolder.FullName) (pattern: $pattern)" -Level "DEBUG"
+                        $skip = $true
+                        break
+                    }
+                }
+            }
+            if ($skip) { continue }
+
             if (-not $FoundUsers.ContainsKey($userName)) {
                 Write-Log "Orphaned Folder Redirection found for user '$userName': $($frSubFolder.FullName)" -Level "INFO"
 
@@ -982,6 +1025,12 @@ function Remove-EmptyFolders {
     }
 }
 
+# ========== HELPER FUNCTIONS ==========
+function Format-Count {
+    param([int]$Success, [int]$Total)
+    if ($Total -eq 0) { return "0" }
+    return "$Success / $Total"
+}
 
 # ========== MAIN SCRIPT ==========
 Write-Log "=" * 70 -Level "INFO"
@@ -1019,14 +1068,16 @@ $stats = @{
     FolderRedirectionDeleteFailed   = 0
     FolderRedirectionToMoveCount    = 0
     FolderRedirectionToDeleteCount  = 0
-    OrphanedFRProcessedCount        = 0   # processed (moved/deleted)
-    OrphanedFRReportedCount         = 0   # only reported (no action)
+    OrphanedFRProcessedCount        = 0
+    OrphanedFRReportedCount         = 0
     OldQuarantineProfiles           = 0
     EmptyFolders                    = 0
 }
 
 # Execution details for HTML report
 $executionDetails = [System.Collections.Generic.List[PSObject]]::new()
+# Detailed statistics per source for final report
+$sourceReports = [System.Collections.Generic.List[PSObject]]::new()
 
 foreach ($source in $userProfileSources) {
     Write-Log "" -Level "INFO"
@@ -1079,6 +1130,31 @@ foreach ($source in $userProfileSources) {
         }
     }
 
+    # Initialize source-level stats
+    $sourceStats = @{
+        UsersProcessed         = 0
+        ProfilesFound          = 0
+        CitrixProfiles         = 0
+        RoamingProfiles        = 0
+        ResetProfiles          = 0
+        NotDefinedProfiles     = 0
+        ProfilesToMove         = 0
+        ProfilesToDelete       = 0
+        ProfilesMovedSuccess   = 0
+        ProfilesMoveFailed     = 0
+        ProfilesDeletedSuccess = 0
+        ProfilesDeleteFailed   = 0
+        FRToMove               = 0
+        FRToDelete             = 0
+        FRMovedSuccess         = 0
+        FRMoveFailed           = 0
+        FRDeletedSuccess       = 0
+        FRDeleteFailed         = 0
+        OrphanedFRProcessed    = 0
+        OrphanedFRReported     = 0
+        QuarantineCleaned      = 0
+    }
+
     try {
         if (-not (Test-Path $source.ProfileRoot)) {
             Write-Log "ERROR: Network path is not accessible" -Level "ERROR"
@@ -1086,8 +1162,7 @@ foreach ($source in $userProfileSources) {
         }
         
         $userFolders = Get-ChildItem -Path $source.ProfileRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { ($_.Name -like $source.PatternProfile) -and ($_.FullName -notlike "$($source.QuarantinePath)*") } |
-        Select-Object -First 200
+        Where-Object { ($_.Name -like $source.PatternProfile) -and ($_.FullName -notlike "$($source.QuarantinePath)*") }
         
         # Build list of full paths to exclude from profile scanning (folder redirection roots)
         $excludeFullPaths = @()
@@ -1095,16 +1170,46 @@ foreach ($source in $userProfileSources) {
             $excludeFullPaths += $source.FolderRedirectionPaths
         }
 
-        # Filter out user folders that are located under any folder redirection root
+        # Get FR exclude patterns
+        $frExcludePatterns = @()
+        if ($source.PSObject.Properties.Name -contains 'FolderRedirectionExcludePatterns' -and $source.FolderRedirectionExcludePatterns) {
+            $frExcludePatterns = $source.FolderRedirectionExcludePatterns
+        }
+
+        # Filter out user folders that are located under any folder redirection root,
+        # and also exclude specific subfolders inside FR paths based on patterns
         if ($excludeFullPaths.Count -gt 0) {
             $userFolders = $userFolders | Where-Object {
                 $folderPath = $_.FullName
                 $excluded = $false
                 foreach ($exPath in $excludeFullPaths) {
-                    # Check if the current folder is a subfolder of an excluded path
-                    if ($folderPath -like "$exPath\*" -or $folderPath -eq $exPath) {
-                        $excluded = $true
-                        Write-Log "Excluded folder (folder redirection root or subfolder): $folderPath" -Level "DEBUG"
+                    # Check if folder is exactly the FR root or a subfolder under it
+                    if ($folderPath -eq $exPath -or $folderPath.StartsWith("$exPath\", 'OrdinalIgnoreCase')) {
+                        # If it's inside an FR path, check against FR exclude patterns
+                        if ($frExcludePatterns.Count -gt 0) {
+                            $relativePath = $folderPath.Substring($exPath.Length).TrimStart('\')
+                            if ($relativePath -eq '') {
+                                # This is the FR root itself – always exclude it from profile scanning
+                                $excluded = $true
+                            }
+                            else {
+                                # Check if the relative path (or any part) matches any exclusion pattern
+                                foreach ($pattern in $frExcludePatterns) {
+                                    if ($relativePath -like $pattern) {
+                                        $excluded = $true
+                                        Write-Log "Excluded folder (FR exclude pattern '$pattern'): $folderPath" -Level "DEBUG"
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                        else {
+                            # No FR exclude patterns, exclude the entire FR root and all subfolders
+                            $excluded = $true
+                        }
+                        if (-not $excluded) {
+                            Write-Log "Not excluded (inside FR but not matched by patterns): $folderPath" -Level "DEBUG"
+                        }
                         break
                     }
                 }
@@ -1138,23 +1243,14 @@ foreach ($source in $userProfileSources) {
                     -EnableQuarantine $enableQuarantine `
                     -SourceName $source.Name `
                     -FoundUsers $foundUsers `
-                    -ProcessOrphanedFR $orphanFRMode
+                    -ProcessOrphanedFR $orphanFRMode `
+                    -ExcludePatterns $frExcludePatterns
             }
             continue
         }
         
         Write-Log "Found user folders: $($userFolders.Count)" -Level "INFO"
         
-        $sourceStats = @{
-            UsersProcessed     = 0
-            ProfilesFound      = 0
-            CitrixProfiles     = 0
-            RoamingProfiles    = 0
-            ResetProfiles      = 0
-            NotDefinedProfiles = 0
-            ProfilesToMove     = 0   # total number of profiles to process (move+delete)
-        }
-
         # Collect usernames for orphaned FR detection (normalized)
         $foundUsers = @{}
         
@@ -1269,8 +1365,7 @@ foreach ($source in $userProfileSources) {
                 
                 # If there is a reason – profile is subject to processing
                 if ($moveReason) {
-                    $userHadAction = $true   # <--- Set flag when action is taken
-                    $sourceStats.ProfilesToMove++
+                    $userHadAction = $true
                     
                     # Determine action: MOVE (quarantine) or DELETE
                     $action = if ($enableQuarantine) { "MOVE" } else { "DELETE" }
@@ -1308,9 +1403,11 @@ foreach ($source in $userProfileSources) {
                     # Update statistics based on action
                     if ($action -eq "MOVE") {
                         $stats.ProfilesToMoveCount++
+                        $sourceStats.ProfilesToMove++
                     }
                     else {
                         $stats.ProfilesToDeleteCount++
+                        $sourceStats.ProfilesToDelete++
                     }
                     
                     # Additional counters by reason
@@ -1391,6 +1488,7 @@ foreach ($source in $userProfileSources) {
                             }
 
                             $stats.FolderRedirectionToMoveCount++
+                            $sourceStats.FRToMove++
                             if ($TestMode) {
                                 $frDetail.Status = "TEST"
                                 $null = Move-FolderRedirectionToQuarantine -SourcePath $frUserFolder -DestinationPath $destinationPath -UserName $userName -Reason "USER_PROFILE_REMOVED"
@@ -1424,6 +1522,7 @@ foreach ($source in $userProfileSources) {
                             }
 
                             $stats.FolderRedirectionToDeleteCount++
+                            $sourceStats.FRToDelete++
                             if ($TestMode) {
                                 $frDetail.Status = "TEST"
                                 $null = Remove-FolderRedirection -UserFolderPath $frUserFolder -UserName $userName -Reason "USER_PROFILE_REMOVED"
@@ -1457,7 +1556,8 @@ foreach ($source in $userProfileSources) {
                 -EnableQuarantine $enableQuarantine `
                 -SourceName $source.Name `
                 -FoundUsers $foundUsers `
-                -ProcessOrphanedFR $orphanFRMode
+                -ProcessOrphanedFR $orphanFRMode `
+                -ExcludePatterns $frExcludePatterns
         }
 
         # Clean up old quarantine (only if quarantine is enabled and path exists)
@@ -1485,8 +1585,49 @@ foreach ($source in $userProfileSources) {
             Remove-EmptyFolders -FolderPath $source.ProfileRoot -ExcludePatterns $excludePatterns
         }
         
+        # Collect detailed statistics from executionDetails for this source
+        $sourceName = $source.Name
+        $sourceStats.ProfilesMovedSuccess = ($executionDetails | Where-Object { $_.Source -eq $sourceName -and $_.Action -eq "MOVE" -and $_.ProfileType -ne "FolderRedirection" -and $_.Status -eq "SUCCESS" }).Count
+        $sourceStats.ProfilesMoveFailed = ($executionDetails | Where-Object { $_.Source -eq $sourceName -and $_.Action -eq "MOVE" -and $_.ProfileType -ne "FolderRedirection" -and $_.Status -eq "FAILED" }).Count
+        $sourceStats.ProfilesDeletedSuccess = ($executionDetails | Where-Object { $_.Source -eq $sourceName -and $_.Action -eq "DELETE" -and $_.ProfileType -ne "FolderRedirection" -and $_.Status -eq "SUCCESS" }).Count
+        $sourceStats.ProfilesDeleteFailed = ($executionDetails | Where-Object { $_.Source -eq $sourceName -and $_.Action -eq "DELETE" -and $_.ProfileType -ne "FolderRedirection" -and $_.Status -eq "FAILED" }).Count
+        $sourceStats.FRMovedSuccess = ($executionDetails | Where-Object { $_.Source -eq $sourceName -and $_.Action -eq "MOVE" -and $_.ProfileType -eq "FolderRedirection" -and $_.Reason -ne "ORPHANED" -and $_.Status -eq "SUCCESS" }).Count
+        $sourceStats.FRMoveFailed = ($executionDetails | Where-Object { $_.Source -eq $sourceName -and $_.Action -eq "MOVE" -and $_.ProfileType -eq "FolderRedirection" -and $_.Reason -ne "ORPHANED" -and $_.Status -eq "FAILED" }).Count
+        $sourceStats.FRDeletedSuccess = ($executionDetails | Where-Object { $_.Source -eq $sourceName -and $_.Action -eq "DELETE" -and $_.ProfileType -eq "FolderRedirection" -and $_.Reason -ne "ORPHANED" -and $_.Status -eq "SUCCESS" }).Count
+        $sourceStats.FRDeleteFailed = ($executionDetails | Where-Object { $_.Source -eq $sourceName -and $_.Action -eq "DELETE" -and $_.ProfileType -eq "FolderRedirection" -and $_.Reason -ne "ORPHANED" -and $_.Status -eq "FAILED" }).Count
+        $sourceStats.OrphanedFRProcessed = ($executionDetails | Where-Object { $_.Source -eq $sourceName -and $_.ProfileType -eq "FolderRedirection" -and $_.Reason -eq "ORPHANED" -and $_.Status -eq "SUCCESS" }).Count
+        $sourceStats.OrphanedFRReported = ($executionDetails | Where-Object { $_.Source -eq $sourceName -and $_.ProfileType -eq "FolderRedirection" -and $_.Reason -eq "ORPHANED" -and $_.Status -in @("REPORTED", "TEST") }).Count
+        $sourceStats.QuarantineCleaned = ($executionDetails | Where-Object { $_.Source -eq $sourceName -and $_.ProfileType -eq "Quarantine" -and $_.Status -in @("SUCCESS", "TEST") }).Count
+
+        # Add to source reports collection
+        $sourceReport = [PSCustomObject]@{
+            SourceName             = $sourceName
+            UsersProcessed         = $sourceStats.UsersProcessed
+            ProfilesFound          = $sourceStats.ProfilesFound
+            CitrixProfiles         = $sourceStats.CitrixProfiles
+            RoamingProfiles        = $sourceStats.RoamingProfiles
+            ResetProfiles          = $sourceStats.ResetProfiles
+            NotDefinedProfiles     = $sourceStats.NotDefinedProfiles
+            ProfilesToMove         = $sourceStats.ProfilesToMove
+            ProfilesToDelete       = $sourceStats.ProfilesToDelete
+            ProfilesMovedSuccess   = $sourceStats.ProfilesMovedSuccess
+            ProfilesMoveFailed     = $sourceStats.ProfilesMoveFailed
+            ProfilesDeletedSuccess = $sourceStats.ProfilesDeletedSuccess
+            ProfilesDeleteFailed   = $sourceStats.ProfilesDeleteFailed
+            FRToMove               = $sourceStats.FRToMove
+            FRToDelete             = $sourceStats.FRToDelete
+            FRMovedSuccess         = $sourceStats.FRMovedSuccess
+            FRMoveFailed           = $sourceStats.FRMoveFailed
+            FRDeletedSuccess       = $sourceStats.FRDeletedSuccess
+            FRDeleteFailed         = $sourceStats.FRDeleteFailed
+            OrphanedFRProcessed    = $sourceStats.OrphanedFRProcessed
+            OrphanedFRReported     = $sourceStats.OrphanedFRReported
+            QuarantineCleaned      = $sourceStats.QuarantineCleaned
+        }
+        $sourceReports.Add($sourceReport)
+
         Write-Log "" -Level "INFO"
-        Write-Log "Statistics for source '$($source.Name)':" -Level "INFO"
+        Write-Log "Statistics for source '$sourceName':" -Level "INFO"
         Write-Log "  Users: $($sourceStats.UsersProcessed)" -Level "INFO"
         Write-Log "  Profiles found: $($sourceStats.ProfilesFound)" -Level "INFO"
         Write-Log "    - Citrix UPM: $($sourceStats.CitrixProfiles)" -Level "INFO"
@@ -1495,10 +1636,10 @@ foreach ($source in $userProfileSources) {
         Write-Log "    - Undefined/empty profiles: $($sourceStats.NotDefinedProfiles)" -Level "INFO"
         
         if ($TestMode) {
-            Write-Log "  Profiles to process (TEST): $($sourceStats.ProfilesToMove)" -Level "INFO"
+            Write-Log "  Profiles to process (TEST): move $($sourceStats.ProfilesToMove), delete $($sourceStats.ProfilesToDelete)" -Level "INFO"
         }
         else {
-            Write-Log "  Profiles processed (attempts): $($sourceStats.ProfilesToMove)" -Level "INFO"
+            Write-Log "  Profiles processed: moved $(Format-Count -Success $sourceStats.ProfilesMovedSuccess -Total $sourceStats.ProfilesToMove) (err $($sourceStats.ProfilesMoveFailed)), deleted $(Format-Count -Success $sourceStats.ProfilesDeletedSuccess -Total $sourceStats.ProfilesToDelete) (err $($sourceStats.ProfilesDeleteFailed))" -Level "INFO"
         }
         
         $stats.SourcesProcessed++
@@ -1528,50 +1669,63 @@ catch { }
 # ========== FINAL STATISTICS ==========
 Write-Log "" -Level "INFO"
 Write-Log "=" * 70 -Level "INFO"
-
 if ($TestMode) {
-    Write-Log "TEST MODE - CHECK RESULTS:" -Level "INFO"
+    Write-Log "TEST MODE - CHECK RESULTS" -Level "INFO"
 }
 else {
-    Write-Log "REAL MODE - EXECUTION RESULTS:" -Level "INFO"
+    Write-Log "REAL MODE - EXECUTION RESULTS" -Level "INFO"
 }
+Write-Log "=" * 70 -Level "INFO"
 
-Write-Log "Sources processed: $($stats.SourcesProcessed)/$($stats.TotalSources)" -Level "INFO"
-Write-Log "Profiles found: $($stats.TotalProfilesFound)" -Level "INFO"
-Write-Log "  - Citrix UPM: $($stats.CitrixProfilesFound)" -Level "INFO"
-Write-Log "  - Microsoft Roaming: $($stats.RoamingProfilesFound)" -Level "INFO"
-Write-Log "  - Reset Citrix: $($stats.ResetProfilesFound)" -Level "INFO"
-Write-Log "  - Undefined/empty profiles: $($stats.NotDefinedProfilesFound)" -Level "INFO"
-
+# Overall summary
+Write-Log "TOTAL SUMMARY (all sources)" -Level "INFO"
+Write-Log "  Sources processed      : $($stats.SourcesProcessed) of $($stats.TotalSources)" -Level "INFO"
+Write-Log "  Profiles found         : $($stats.TotalProfilesFound)" -Level "INFO"
 if ($TestMode) {
-    Write-Log "Profiles to process (TEST): $($stats.ProfilesToMoveCount + $stats.ProfilesToDeleteCount)" -Level "INFO"
-    Write-Log "  - to move: $($stats.ProfilesToMoveCount)" -Level "INFO"
-    Write-Log "  - to delete: $($stats.ProfilesToDeleteCount)" -Level "INFO"
-    Write-Log "  - by age: $($stats.ProfilesToMoveByAge)" -Level "INFO"
-    Write-Log "  - by AD status: $($stats.ProfilesToMoveByAD)" -Level "INFO"
-    Write-Log "  - by corruption: $($stats.ProfilesToMoveByCorruption)" -Level "INFO"
-    Write-Log "  - reset profiles: $($stats.ResetProfilesMoved)" -Level "INFO"
-    Write-Log "Folder Redirection to process (TEST): $($stats.FolderRedirectionToMoveCount + $stats.FolderRedirectionToDeleteCount)" -Level "INFO"
-    Write-Log "  - to move: $($stats.FolderRedirectionToMoveCount)" -Level "INFO"
-    Write-Log "  - to delete: $($stats.FolderRedirectionToDeleteCount)" -Level "INFO"
-    Write-Log "Orphaned FR reported (TEST): $($stats.OrphanedFRReportedCount)" -Level "INFO"
+    Write-Log "  Profiles to move/delete: $($stats.ProfilesToMoveCount) / $($stats.ProfilesToDeleteCount)" -Level "INFO"
+    Write-Log "  FR to move/delete      : $($stats.FolderRedirectionToMoveCount) / $($stats.FolderRedirectionToDeleteCount)" -Level "INFO"
+    Write-Log "  Orphaned FR reported   : $($stats.OrphanedFRReportedCount)" -Level "INFO"
 }
 else {
-    Write-Log "Moved profiles: $($stats.ProfilesMovedSuccess)/$($stats.ProfilesToMoveCount) (success/total)" -Level "INFO"
-    Write-Log "Deleted profiles: $($stats.ProfilesDeletedSuccess)/$($stats.ProfilesToDeleteCount) (success/total)" -Level "INFO"
-    Write-Log "  - by age: $($stats.ProfilesToMoveByAge)" -Level "INFO"
-    Write-Log "  - by AD status: $($stats.ProfilesToMoveByAD)" -Level "INFO"
-    Write-Log "  - by corruption: $($stats.ProfilesToMoveByCorruption)" -Level "INFO"
-    Write-Log "  - reset profiles: $($stats.ResetProfilesMoved)" -Level "INFO"
-    Write-Log "  - move errors: $($stats.ProfilesMoveFailed)" -Level "INFO"
-    Write-Log "  - delete errors: $($stats.ProfilesDeleteFailed)" -Level "INFO"
-    Write-Log "Quarantine cleanup: $($stats.OldQuarantineProfiles) profiles removed" -Level "INFO"
-    Write-Log "Folder Redirection moved: $($stats.FolderRedirectionMovedSuccess)/$($stats.FolderRedirectionToMoveCount) (success/total)" -Level "INFO"
-    Write-Log "Folder Redirection deleted: $($stats.FolderRedirectionDeletedSuccess)/$($stats.FolderRedirectionToDeleteCount) (success/total)" -Level "INFO"
-    Write-Log "  - move errors: $($stats.FolderRedirectionMoveFailed)" -Level "INFO"
-    Write-Log "  - delete errors: $($stats.FolderRedirectionDeleteFailed)" -Level "INFO"
-    Write-Log "Orphaned FR processed: $($stats.OrphanedFRProcessedCount)" -Level "INFO"
-    Write-Log "Orphaned FR reported only: $($stats.OrphanedFRReportedCount)" -Level "INFO"
+    $profMoveStr = Format-Count -Success $stats.ProfilesMovedSuccess -Total $stats.ProfilesToMoveCount
+    $profDelStr = Format-Count -Success $stats.ProfilesDeletedSuccess -Total $stats.ProfilesToDeleteCount
+    $frMoveStr = Format-Count -Success $stats.FolderRedirectionMovedSuccess -Total $stats.FolderRedirectionToMoveCount
+    $frDelStr = Format-Count -Success $stats.FolderRedirectionDeletedSuccess -Total $stats.FolderRedirectionToDeleteCount
+    Write-Log "  Profiles moved/deleted : $profMoveStr / $profDelStr" -Level "INFO"
+    Write-Log "  FR moved/deleted       : $frMoveStr / $frDelStr" -Level "INFO"
+    Write-Log "  Orphaned FR processed  : $($stats.OrphanedFRProcessedCount)" -Level "INFO"
+    Write-Log "  Quarantine cleaned     : $($stats.OldQuarantineProfiles)" -Level "INFO"
+}
+Write-Log "" -Level "INFO"
+
+# Detailed per-source breakdown
+foreach ($rep in $sourceReports) {
+    Write-Log "--- $($rep.SourceName) ---" -Level "INFO"
+    Write-Log "  Users processed        : $($rep.UsersProcessed)" -Level "INFO"
+    Write-Log "  Profiles found         : $($rep.ProfilesFound)" -Level "INFO"
+    Write-Log "    - Citrix UPM         : $($rep.CitrixProfiles)" -Level "INFO"
+    Write-Log "    - MS Roaming         : $($rep.RoamingProfiles)" -Level "INFO"
+    Write-Log "    - Reset Citrix       : $($rep.ResetProfiles)" -Level "INFO"
+    Write-Log "    - Undefined/empty    : $($rep.NotDefinedProfiles)" -Level "INFO"
+
+    if ($TestMode) {
+        Write-Log "  Planned actions (TEST):" -Level "INFO"
+        Write-Log "    Profiles: move $($rep.ProfilesToMove), delete $($rep.ProfilesToDelete)" -Level "INFO"
+        Write-Log "    FR      : move $($rep.FRToMove), delete $($rep.FRToDelete)" -Level "INFO"
+        Write-Log "    Orphaned FR reported : $($rep.OrphanedFRReported)" -Level "INFO"
+    }
+    else {
+        $pMove = Format-Count -Success $rep.ProfilesMovedSuccess -Total $rep.ProfilesToMove
+        $pDel = Format-Count -Success $rep.ProfilesDeletedSuccess -Total $rep.ProfilesToDelete
+        $fMove = Format-Count -Success $rep.FRMovedSuccess -Total $rep.FRToMove
+        $fDel = Format-Count -Success $rep.FRDeletedSuccess -Total $rep.FRToDelete
+        Write-Log "  Executed actions:" -Level "INFO"
+        Write-Log "    Profiles: moved $pMove (err $($rep.ProfilesMoveFailed)), deleted $pDel (err $($rep.ProfilesDeleteFailed))" -Level "INFO"
+        Write-Log "    FR      : moved $fMove (err $($rep.FRMoveFailed)), deleted $fDel (err $($rep.FRDeleteFailed))" -Level "INFO"
+        Write-Log "    Orphaned FR processed: $($rep.OrphanedFRProcessed)" -Level "INFO"
+        Write-Log "    Quarantine cleaned   : $($rep.QuarantineCleaned)" -Level "INFO"
+    }
+    Write-Log "" -Level "INFO"
 }
 
 Write-Log "=" * 70 -Level "INFO"
@@ -1587,54 +1741,68 @@ Execution Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 Execution Mode: $(if($TestMode){'TESTING'}else{'REAL'})
 ==========================================================
 
-SUMMARY:
-- Sources processed: $($stats.SourcesProcessed)/$($stats.TotalSources)
-- Profiles found: $($stats.TotalProfilesFound)
-  * Citrix UPM: $($stats.CitrixProfilesFound)
-  * Microsoft Roaming: $($stats.RoamingProfilesFound)
-  * Reset Citrix: $($stats.ResetProfilesFound)
-  * Undefined/empty profiles: $($stats.NotDefinedProfilesFound)
-
+TOTAL SUMMARY
+-------------
+Sources processed      : $($stats.SourcesProcessed) of $($stats.TotalSources)
+Profiles found         : $($stats.TotalProfilesFound)
 $(
 if ($TestMode) {
-    "TEST MODE - PROFILES WERE NOT PROCESSED:`n"
-    "Profiles to process: $($stats.ProfilesToMoveCount + $stats.ProfilesToDeleteCount)"
-    "  * To move: $($stats.ProfilesToMoveCount)"
-    "  * To delete: $($stats.ProfilesToDeleteCount)"
-    "  * By age: $($stats.ProfilesToMoveByAge)"
-    "  * By AD status: $($stats.ProfilesToMoveByAD)"
-    "  * By corruption: $($stats.ProfilesToMoveByCorruption)"
-    "  * Reset profiles: $($stats.ResetProfilesMoved)`n"
-    "Folder Redirection to process: $($stats.FolderRedirectionToMoveCount + $stats.FolderRedirectionToDeleteCount)"
-    "  * To move: $($stats.FolderRedirectionToMoveCount)"
-    "  * To delete: $($stats.FolderRedirectionToDeleteCount)"
-    "Orphaned FR reported: $($stats.OrphanedFRReportedCount)`n"
+@"
+Profiles to move/delete: $($stats.ProfilesToMoveCount) / $($stats.ProfilesToDeleteCount)
+FR to move/delete      : $($stats.FolderRedirectionToMoveCount) / $($stats.FolderRedirectionToDeleteCount)
+Orphaned FR reported   : $($stats.OrphanedFRReportedCount)
+"@
 } else {
-    "REAL MODE - RESULTS:`n"
-    "Moved profiles: $($stats.ProfilesMovedSuccess)/$($stats.ProfilesToMoveCount) (success/total)"
-    "Deleted profiles: $($stats.ProfilesDeletedSuccess)/$($stats.ProfilesToDeleteCount) (success/total)"
-    "  * Quarantine cleanup: $($stats.OldQuarantineProfiles) profiles removed"
-    "  * By age: $($stats.ProfilesToMoveByAge)"
-    "  * By AD status: $($stats.ProfilesToMoveByAD)"
-    "  * By corruption: $($stats.ProfilesToMoveByCorruption)"
-    "  * Reset profiles: $($stats.ResetProfilesMoved)"
-    "  * Move errors: $($stats.ProfilesMoveFailed)"
-    "  * Delete errors: $($stats.ProfilesDeleteFailed)`n"
-    "Folder Redirection:"
-    "  * Moved: $($stats.FolderRedirectionMovedSuccess)/$($stats.FolderRedirectionToMoveCount) (success/total)"
-    "  * Deleted: $($stats.FolderRedirectionDeletedSuccess)/$($stats.FolderRedirectionToDeleteCount) (success/total)"
-    "  * Orphaned processed: $($stats.OrphanedFRProcessedCount)"
-    "  * Orphaned reported only: $($stats.OrphanedFRReportedCount)"
-    "  * Move errors: $($stats.FolderRedirectionMoveFailed)"
-    "  * Delete errors: $($stats.FolderRedirectionDeleteFailed)`n"
+@"
+Profiles moved/deleted : $(Format-Count -Success $stats.ProfilesMovedSuccess -Total $stats.ProfilesToMoveCount) / $(Format-Count -Success $stats.ProfilesDeletedSuccess -Total $stats.ProfilesToDeleteCount)
+FR moved/deleted       : $(Format-Count -Success $stats.FolderRedirectionMovedSuccess -Total $stats.FolderRedirectionToMoveCount) / $(Format-Count -Success $stats.FolderRedirectionDeletedSuccess -Total $stats.FolderRedirectionToDeleteCount)
+Orphaned FR processed  : $($stats.OrphanedFRProcessedCount)
+Quarantine cleaned     : $($stats.OldQuarantineProfiles)
+"@
 }
 )
 
-SOURCES:
-$($userProfileSources | Where-Object { $_.Enabled } | ForEach-Object {
-    "- $($_.Name): $($_.ProfileRoot) (pattern: $($_.PatternProfile), quarantine: $(if($_.EnableQuarantine -eq $false){'disabled'}else{'enabled'}))"
-} | Out-String)
+DETAILS BY SOURCE
+-----------------
+$(
+foreach ($rep in $sourceReports) {
+@"
+[$($rep.SourceName)]
+  Users processed        : $($rep.UsersProcessed)
+  Profiles found         : $($rep.ProfilesFound)
+    - Citrix UPM         : $($rep.CitrixProfiles)
+    - MS Roaming         : $($rep.RoamingProfiles)
+    - Reset Citrix       : $($rep.ResetProfiles)
+    - Undefined/empty    : $($rep.NotDefinedProfiles)
+$(
+if ($TestMode) {
+@"
+  Planned (TEST):
+    Profiles: move $($rep.ProfilesToMove), delete $($rep.ProfilesToDelete)
+    FR      : move $($rep.FRToMove), delete $($rep.FRToDelete)
+    Orphaned FR reported : $($rep.OrphanedFRReported)
+"@
+} else {
+@"
+  Executed:
+    Profiles: moved $(Format-Count -Success $rep.ProfilesMovedSuccess -Total $rep.ProfilesToMove) (err $($rep.ProfilesMoveFailed)), deleted $(Format-Count -Success $rep.ProfilesDeletedSuccess -Total $rep.ProfilesToDelete) (err $($rep.ProfilesDeleteFailed))
+    FR      : moved $(Format-Count -Success $rep.FRMovedSuccess -Total $rep.FRToMove) (err $($rep.FRMoveFailed)), deleted $(Format-Count -Success $rep.FRDeletedSuccess -Total $rep.FRToDelete) (err $($rep.FRDeleteFailed))
+    Orphaned FR processed: $($rep.OrphanedFRProcessed)
+    Quarantine cleaned   : $($rep.QuarantineCleaned)
+"@
+}
+)
 
+"@
+}
+)
+
+SOURCES CONFIGURATION
+---------------------
+$($userProfileSources | Where-Object { $_.Enabled } | ForEach-Object {
+    $qStatus = if ($_.EnableQuarantine -eq $false) { 'quarantine disabled' } else { 'quarantine enabled' }
+    "- $($_.Name): $($_.ProfileRoot) (pattern: $($_.PatternProfile), $qStatus)"
+} | Out-String)
 ==========================================================
 Execution log: $LogFile
 "@
