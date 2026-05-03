@@ -37,27 +37,30 @@
     "_comment_Sources": "List of profile shares to process",
     "ProfileSources": [
         {
-            "Name": "Example Citrix UPM Share",
+            "_comment_Name": "Descriptive name for this source",
+            "Name": "Example File Server",
             "Enabled": true,
-            "ProfileRoot": "\\\\fs01.example.com\\Profiles",
+            "ProfileRoot": "\\\\fs01\\Profiles",
             "PatternProfile": "*",
             "DaysToDelete": 365,
+            "SkipNewUserFolders": true,
             "EnableQuarantine": true,
-            "QuarantinePath": "\\\\fs01.example.com\\Quarantine",
+            "QuarantinePath": "\\\\fs01\\Quarantine",
             "QuarantineDays": 14,
             "ExcludeFolders": [
                 "Public",
                 "Default",
                 "Temp*",
                 "*.bak",
-                "!ThinAppCap",
                 "~snapshot"
             ],
             "EnableEmptyFolderCleanup": true,
             "EmptyFolderExcludePatterns": [
                 "Public",
                 "Default",
-                "Temp*"
+                "Temp*",
+                "FR01",
+                "FR02"
             ],
             "_comment_AD_override": "Per-source AD settings (optional, overrides global)",
             "ActiveDirectory": {
@@ -68,7 +71,30 @@
                     "Administrator",
                     "Guest"
                 ]
-            }
+            },
+            "_comment_FR": "Folder Redirection settings (optional)",
+            "FolderRedirectionPaths": [
+                "\\\\fs01\\Profiles\\FR01",
+                "\\\\fs01\\Profiles\\FR02"
+            ],
+            "FolderRedirectionExcludePatterns": [
+                "!Containers",
+                "!System"
+            ],
+            "ProcessOrphanedFR": "ReportOnly",
+            "_comment_CorruptedProfileActions": "Actions when NTUSER.DAT is missing or too small",
+            "ActionOnMissingNTUserDat": "Ignore",
+            "ActionOnTooSmallNTUserDat": "Quarantine",
+            "_comment_FallbackAge": "Use alternative sources to determine age when NTUSER.DAT is missing",
+            "UseFallbackAgeWhenNTUserMissing": true,
+            "FallbackAgeSource": "Auto",
+            "_comment_AdaptiveScan": "Adaptive profile discovery settings",
+            "MaxProfileScanDepth": 2,
+            "ProfileIndicators": [
+                "UPM_Profile\\NTUSER.DAT",
+                "NTUSER.DAT",
+                "UPMSettings.ini"
+            ]
         }
     ]
 }

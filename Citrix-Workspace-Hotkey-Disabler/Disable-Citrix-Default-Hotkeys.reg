@@ -1,0 +1,28 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Citrix\ICA Client\Engine\Lockdown Profiles\All Regions\Lockdown\Client Engine\Hot Keys]
+"HotKey1Shift"="(none)"
+"HotKey1Char"="(none)"
+"HotKey2Shift"="(none)"
+"HotKey2Char"="(none)"
+"HotKey3Shift"="(none)"
+"HotKey3Char"="(none)"
+"HotKey4Shift"="(none)"
+"HotKey4Char"="(none)"
+"HotKey5Shift"="(none)"
+"HotKey5Char"="(none)"
+"HotKey6Shift"="(none)"
+"HotKey6Char"="(none)"
+"HotKey7Shift"="(none)"
+"HotKey7Char"="(none)"
+"HotKey8Shift"="(none)"
+"HotKey8Char"="(none)"
+"HotKey9Shift"="(none)"
+"HotKey9Char"="(none)"
+"HotKey10Shift"="(none)"
+"HotKey10Char"="(none)"
+"HotKey14Shift"="(none)"
+"HotKey14Char"="(none)"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Citrix\ICA Client\Engine\Lockdown Profiles\All Regions\Lockdown\Virtual Channels\Keyboard]
+"TransparentKeyPassthrough"="FullScreenOnly"

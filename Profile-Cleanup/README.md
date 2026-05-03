@@ -1,19 +1,26 @@
 # Remove-OldProfiles.ps1
 
-A powerful PowerShell script to automatically clean up old, corrupted, or orphaned user profiles (Citrix UPM, Microsoft Roaming, and reset profiles) from network shares. It supports test mode, quarantine, Active Directory integration, detailed logging, and email reports.
+A powerful PowerShell script to automatically clean up old, corrupted, or orphaned user profiles (Citrix UPM, Microsoft Roaming, and reset profiles) from network shares. It supports test mode, quarantine, Active Directory integration, folder redirection handling, detailed logging, and email reports.
 
 ## Features
 
-- **Profile type detection** – correctly identifies Citrix UPM, Microsoft Roaming, and reset (upm_*) profiles.
-- **Health check** – validates `NTUSER.DAT` existence and size (optional).
+- **Profile type detection** – correctly identifies Citrix UPM, Microsoft Roaming, and reset (`upm_*`) profiles using configurable indicators.
+- **Health check** – validates `NTUSER.DAT` existence and size (configurable threshold).
 - **Age-based cleanup** – deletes/moves profiles that have not been used for a configurable number of days.
+- **New user folder skipping** – optionally skip folders created more recently than the inactivity threshold, unless aggressive actions (delete/quarantine) are configured for corrupted profiles.
 - **Active Directory integration** – checks if a user account exists and is enabled; can process per‑source AD domains.
 - **Quarantine** – moves profiles to a separate folder instead of deleting them immediately; old quarantine items are automatically removed after a set period.
 - **Empty folder cleanup** – removes empty user folders after profile deletion (with exclusion patterns).
+- **Folder Redirection (FR) support** – optionally processes redirected folders (Documents, Desktop, etc.) associated with a user when their profile is removed.
+- **Orphaned FR handling** – detects and optionally cleans up redirected folders left behind when a profile no longer exists, with configurable modes (report only, delete/move).
+- **Intelligent age fallback** – when `NTUSER.DAT` is missing or damaged, can use alternative sources (profile folder or `UPMSettings.ini`) to determine age before deciding action.
+- **Granular control over corrupted profiles** – separate actions for missing vs. too small `NTUSER.DAT`.
+- **Adaptive profile scanning** – recursively scans subfolders up to a configurable depth using customizable indicators. Works with any profile storage structure (Citrix UPM with platform subfolders, Microsoft Roaming, etc.).
 - **Test mode** – dry‑run mode that only logs what would be done, without making any changes.
-- **Email reporting** – sends a summary report (text and optional HTML) with attached log files.
+- **Email reporting** – sends a summary report (plain text in body + HTML attachment).
 - **Detailed logging** – writes to a rotating log file with configurable retention.
 - **Multi‑source support** – can process multiple profile shares with different settings.
+- **Long path support** – handles paths longer than 260 characters and special characters (e.g., `%3A`) using `\\?\UNC\` prefix.
 
 ## Requirements
 
@@ -24,211 +31,240 @@ A powerful PowerShell script to automatically clean up old, corrupted, or orphan
 
 ## Installation
 
-1. Download both files:
+1. Download the files:
    - `Remove-OldProfiles.ps1`
    - `Remove-OldProfiles.ps1.example.json`
-2. Place them in the same directory (or adjust the `-ConfigFile` parameter).
+2. Place them in the same directory.
 3. Copy `Remove-OldProfiles.ps1.example.json` to `Remove-OldProfiles.ps1.json`.
-4. Edit the new `Remove-OldProfiles.ps1.json` file to match your environment.
+4. Edit `Remove-OldProfiles.ps1.json` to match your environment.
 5. Run the script.
 
-## Configuration
+## Understanding Profile Storage Structures
 
-The script uses a JSON configuration file. Below is an example with explanations:
+The script expects a layout where **user folders** reside directly under `ProfileRoot`. The name of each folder is treated as the username (after normalisation – removing version suffixes, domain prefixes, etc.). Inside each user folder, the script searches for **profile folders** using configurable indicators.
 
-```json
-{
-    "GeneralSettings": {
-        "TestMode": false,                    // true = dry run, false = real execution
-        "LogDirectory": "Logs",               // subfolder for logs (relative to script)
-        "LogRetentionDays": 30,               // delete logs older than this
-        "ConsoleOutput": true,                // show output in console
-        "DetailedLogging": true               // write DEBUG level messages
-    },
-    "ActiveDirectory": {
-        "Enabled": true,                      // global AD checks
-        "FQDNDomain": "domain.company.com",
-        "NetBIOSDomain": "DOMAIN",
-        "ExcludeUsers": [ "Administrator", "Guest", "krbtgt" ]
-    },
-    "MailSettings": {
-        "Enabled": true,
-        "SmtpServer": "mail.company.com",
-        "Port": 25,
-        "UseSSL": false,
-        "Credentials": { "UserName": "", "Password": "" }, // optional
-        "From": "notify@company.com",
-        "To": [ "support@company.com" ],
-        "Subject": "[Report] Profile Cleanup"
-    },
-    "ProfileSources": [
-        {
-            "Name": "srt-ctxshare",
-            "Enabled": true,
-            "ProfileRoot": "\\\\fs-server01.company.com\\Profiles",
-            "PatternProfile": "*",            // wildcard for user folders
-            "DaysToDelete": 365,              // inactivity threshold (days)
-            "EnableQuarantine": false,        // if false, profiles are deleted directly
-            "QuarantinePath": "\\\\fs-server01.company.com\\Profiles\\Pending",
-            "QuarantineDays": 14,             // auto‑delete from quarantine after N days
-            "ExcludeFolders": [               // folders to ignore (wildcards allowed)
-                "Public", "Default", "Temp*", "*.bak", "!ThinAppCap", "~snapshot"
-            ],
-            "EnableEmptyFolderCleanup": false,
-            "EmptyFolderExcludePatterns": [   // optional; uses ExcludeFolders if missing
-                "Public", "Default", "Temp*"
-            ],
-            "ActiveDirectory": {               // per‑source AD settings (override global)
-                "Enabled": true,
-                "FQDNDomain": "domain.company.com",
-                "NetBIOSDomain": "DOMAIN",
-                "ExcludeUsers": [ "Administrator", "Guest" ]
-            }
-        }
-    ]
-}
+### Typical Structures
+
+#### Scenario 1: Profiles directly in user folder (Microsoft Roaming)
+
+```
+\\fs01\Profiles               <-- ProfileRoot
+├── John                      <-- User folder
+│   ├── NTUSER.DAT
+│   ├── AppData
+│   └── Desktop
+├── Petrov
+│   ├── NTUSER.DAT
+│   └── ...
 ```
 
-### Explanation of key fields
+#### Scenario 2: Citrix UPM with platform subfolders
 
-| Field | Description |
-|-------|-------------|
-| `TestMode` | If `true`, no actual move/delete operations are performed. |
-| `ActiveDirectory.Enabled` | When enabled, the script checks if the user exists and is enabled. Disabled users or non‑existent users cause profile cleanup. |
-| `ProfileSources[].DaysToDelete` | Number of days of inactivity (based on `NTUSER.DAT` last write time) before a profile is considered old. |
-| `EnableQuarantine` | If `true`, profiles are moved to `QuarantinePath` instead of being deleted. If `false`, they are deleted immediately. |
-| `QuarantineDays` | Profiles older than this in the quarantine folder are permanently deleted. |
-| `ExcludeFolders` | Folders (wildcards allowed) that are completely ignored (e.g., `Public`, `Default`). |
-| `EnableEmptyFolderCleanup` | If `true`, removes empty user folders after all profiles inside have been processed. |
-| `EmptyFolderExcludePatterns` | Patterns to exclude from empty folder cleanup (if not set, falls back to `ExcludeFolders`). |
-| `ActiveDirectory` (per source) | Optional per‑source AD settings. If missing, the global `ActiveDirectory` section is used. |
-
-## How It Works
-
-1. **Load configuration** – reads the JSON file.
-2. **For each enabled profile source**:
-   - Scan `ProfileRoot` for folders matching `PatternProfile`, excluding `ExcludeFolders` and the quarantine folder itself.
-   - For each user folder, call `Find-UserProfiles` to detect one or more profiles inside:
-     - `CitrixUPM` – contains `UPM_Profile` folder or `UPMSettings.ini`.
-     - `MicrosoftRoaming` – contains `NTUSER.DAT` or `AppData`/`Desktop`.
-     - `ResetCitrixProfile` – folder name matches `upm_*` but not `UPM_Profile`.
-     - `NotDefined` – empty folder or no recognisable indicators.
-   - For each profile, determine if it should be cleaned up based on:
-     - **Health** – `NTUSER.DAT` missing or too small → `PROFILE_CORRUPTED`
-     - **Age** – `NTUSER.DAT` last write time older than `DaysToDelete` → `PROFILE_OLD`
-     - **AD status** – user not found or disabled → `USER_NOT_FOUND` / `USER_DISABLED`
-     - **Reset profiles** – always moved/deleted (reason `RESET_PROFILE`)
-   - If a reason exists, the profile is either **moved to quarantine** (if `EnableQuarantine = true`) or **deleted**.
-3. **Cleanup**:
-   - Remove old profiles from quarantine older than `QuarantineDays`.
-   - Delete empty user folders (if enabled).
-4. **Logging & Reporting**:
-   - Write detailed logs to `LogDirectory`.
-   - Generate a text report and an optional HTML report with a table of actions.
-   - Send an email summary if `MailSettings.Enabled = true`.
-5. **Log rotation** – deletes log files older than `LogRetentionDays`.
-
-## Usage
-
-### Basic execution (using default config file in script directory)
-
-```powershell
-.\Remove-OldProfiles.ps1
+```
+\\fs01\Profiles               <-- ProfileRoot
+├── John                      <-- User folder
+│   ├── Win2016v6             <-- Profile folder (Citrix UPM)
+│   │   ├── UPM_Profile
+│   │   │   └── NTUSER.DAT
+│   │   ├── UPMSettings.ini
+│   │   └── Pending
+│   └── Win10x64              <-- Another profile folder for the same user
+│       ├── UPM_Profile
+│       │   └── NTUSER.DAT
+│       └── UPMSettings.ini
+├── Petrov
+│   └── Win2019v6
+│       ├── UPM_Profile
+│       │   └── NTUSER.DAT
+│       └── UPMSettings.ini
 ```
 
-### Specify a different configuration file
+#### Scenario 3: Mixed or custom structures
 
-```powershell
-.\Remove-OldProfiles.ps1 -ConfigFile "C:\MyConfigs\cleanup_prod.json"
-```
+The adaptive scanner can handle any depth of nesting (up to `MaxProfileScanDepth`) and any set of indicators (files/folders that signal a profile). For example, if your profiles are stored as `\\server\share\username\Profiles\V2\NTUSER.DAT`, you can set `MaxProfileScanDepth = 3` and add `"Profiles\V2\NTUSER.DAT"` to `ProfileIndicators`.
 
-### Test mode (dry run)
+## Configuration Reference
 
-Set `"TestMode": true` in the JSON file, or temporarily change it. In test mode the script will:
+### General Settings
 
-- Log all actions as `[TEST]`
-- Show which profiles would be moved/deleted
-- **Not** modify any files or folders
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `TestMode` | `bool` | `false` | If `true`, no actual file operations are performed. |
+| `LogDirectory` | `string` | `"Logs"` | Relative or absolute path for log files. |
+| `LogRetentionDays` | `int` | `30` | How many days to keep log files. |
+| `ConsoleOutput` | `bool` | `true` | Write log messages to the console. |
+| `DetailedLogging` | `bool` | `true` | Include `DEBUG` level messages in the log. |
 
-Always run in test mode first to verify the configuration.
+### Active Directory (Global)
 
-## Active Directory Integration
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `true` | Enable/disable all AD checks. |
+| `FQDNDomain` | `string` | – | Fully qualified domain name (e.g., `contoso.com`). |
+| `NetBIOSDomain` | `string` | – | NetBIOS domain name (e.g., `CONTOSO`). |
+| `ExcludeUsers` | `string[]` | `[]` | Usernames that should **never** be cleaned up. |
 
-The script caches AD queries per user per domain to improve performance. For each profile, it checks:
+### Mail Settings
 
-- Whether the user account exists in the specified domain.
-- Whether the account is enabled (if it exists).
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `false` | Send email reports after execution. |
+| `SmtpServer` | `string` | – | SMTP server hostname or IP. |
+| `Port` | `int` | `25` | SMTP port. |
+| `UseSSL` | `bool` | `false` | Use SSL/TLS for SMTP connection. |
+| `Credentials.UserName` | `string` | `""` | Optional username for SMTP auth. |
+| `Credentials.Password` | `string` | `""` | Optional password for SMTP auth. |
+| `From` | `string` | – | Sender email address. |
+| `To` | `string[]` | – | Recipient email addresses. |
+| `Subject` | `string` | `"[Report] Profile Cleanup"` | Email subject line. |
 
-If the user does **not** exist or is **disabled**, the profile is cleaned up (provided other conditions like age are not already met).
+### Profile Sources (Per Source)
 
-To disable AD checks for a source, set `"ActiveDirectory.Enabled": false` (or globally).
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Name` | `string` | – | Descriptive name for this source. |
+| `Enabled` | `bool` | `true` | If `false`, this source is skipped. |
+| `ProfileRoot` | `string` | – | UNC path to the root folder containing **user folders**. |
+| `PatternProfile` | `string` | `"*"` | Wildcard pattern to match user folders. |
+| `DaysToDelete` | `int` | `365` | Inactivity threshold in days. |
+| `SkipNewUserFolders` | `bool` | `false` | If `true`, skip folders whose creation timestamp is newer than `DaysToDelete` days, **unless** a corrupted profile action (`ActionOnMissingNTUserDat` / `ActionOnTooSmallNTUserDat`) is set to `Delete` or `Quarantine`. |
+| `EnableQuarantine` | `bool` | `true` | Move profiles to `QuarantinePath` instead of deleting. |
+| `QuarantinePath` | `string` | – | UNC path where quarantined items will be stored. |
+| `QuarantineDays` | `int` | `14` | After this many days, items in quarantine are permanently deleted. |
+| `ExcludeFolders` | `string[]` | `[]` | Folder name patterns to ignore (e.g., `"Public"`, `"Default"`). |
+| `EnableEmptyFolderCleanup` | `bool` | `true` | Delete empty user folders after processing. |
+| `EmptyFolderExcludePatterns` | `string[]` | (uses `ExcludeFolders`) | Patterns to exclude from empty folder cleanup. |
+| `ActiveDirectory` | `object` | (global) | Per‑source AD override. |
+| `FolderRedirectionPaths` | `string[]` | `[]` | Root paths for redirected folders (FR). Subfolders with usernames will be processed together with profiles. |
+| `FolderRedirectionExcludePatterns` | `string[]` | `[]` | Patterns for subfolder names inside FR paths to never touch. |
+| `ProcessOrphanedFR` | `string`/`bool` | `"Disabled"` | `"Disabled"`, `"ReportOnly"`, or `"Delete"`. |
+| `ActionOnMissingNTUserDat` | `string` | `"Quarantine"` | `"Quarantine"`, `"Delete"`, or `"Ignore"`. |
+| `ActionOnTooSmallNTUserDat` | `string` | `"Quarantine"` | Same as above. |
+| `UseFallbackAgeWhenNTUserMissing` | `bool` | `true` | Use alternative source to determine age when NTUSER.DAT is missing/too small. |
+| `FallbackAgeSource` | `string` | `"Auto"` | `"Auto"`, `"Folder"`, or `"UPMSettings"`. |
+| `MaxProfileScanDepth` | `int` | `2` | Maximum depth to scan inside a user folder for profile indicators. |
+| `ProfileIndicators` | `string[]` | `["UPM_Profile\NTUSER.DAT", "NTUSER.DAT", "UPMSettings.ini"]` | Relative paths or filenames that signal a profile folder. |
 
-## Quarantine
+#### `SkipNewUserFolders` behaviour in detail
 
-Quarantine is a safety mechanism. Instead of deleting a profile immediately, the script moves it to a dedicated folder (e.g., `Pending`). This allows you to recover profiles if needed. The quarantine folder is automatically cleaned of entries older than `QuarantineDays`.
+- **Default** – `false`: all user folders are processed regardless of their creation date.
+- When `true`:
+  - The script checks the **creation time** of the user folder (the top‑level folder under `ProfileRoot`).
+  - If the folder was created **less than** `DaysToDelete` days ago, it is normally skipped (a debug message is logged).
+  - **Exception**: If the source is configured with `ActionOnMissingNTUserDat` or `ActionOnTooSmallNTUserDat` set to `"Delete"` or `"Quarantine"`, the folder will **still be processed** – even if it is new – because an aggressive action suggests that even recent corrupted profiles must be handled. In this case a debug message indicates that the folder is processed despite `SkipNewUserFolders`.
 
-If you set `"EnableQuarantine": false`, profiles are deleted directly – use with caution.
+This parameter is useful to avoid cleaning brand‑new folders that might not yet have a populated profile, while still allowing immediate cleanup of clearly broken profiles (missing/tiny `NTUSER.DAT`) when needed.
 
-## Email Reports
+## Detailed Explanation of Adaptive Scanning Parameters
 
-The script can send an email report after execution. The report includes:
+### `MaxProfileScanDepth`
+Controls how many levels of subfolders the script will descend into when searching for profiles inside a user's folder.
+- **0**: only the user folder itself is checked.
+- **1**: user folder and its immediate subfolders.
+- **2** (default): covers standard Citrix UPM with one platform subfolder (`username\Win2016v6\`).
+- Higher values can be set for deeper custom structures.
 
-- Summary statistics (number of profiles found, moved, deleted, etc.)
-- List of processed sources
-- Attachments: text report, HTML report (if any profiles were processed), and the log file
+### `ProfileIndicators`
+A list of relative paths (from the scanned folder) that indicate the presence of a profile. When any of these is found, the folder is considered a profile and scanning **stops** for that branch (preventing duplicate detection of subfolders like `UPM_Profile` inside an already identified UPM profile).
 
-Configure `MailSettings` with your SMTP server and recipients. Credentials are optional.
+**Default indicators**:
+- `UPM_Profile\NTUSER.DAT` – Citrix UPM profile.
+- `NTUSER.DAT` – Microsoft Roaming or local profile.
+- `UPMSettings.ini` – Citrix UPM configuration file (often at the same level as the platform folder).
 
-## Logging
+**Customisation example**: If your profiles are stored as `username\Profile\NTUSER.DAT`, add `"Profile\NTUSER.DAT"` to this list.
 
-Logs are stored in the `LogDirectory` (relative to the script). Each execution creates a new log file: `ProfileCleanup_YYYYMMDD_HHmmss.log`. Log entries include timestamps, level (INFO/WARN/ERROR/DEBUG), and the message.
+## Example Configuration Scenarios
 
-Old logs are automatically deleted after `LogRetentionDays`.
-
-## Example Scenarios
-
-### 1. Clean up Citrix UPM profiles older than 90 days, move them to quarantine
+### 1. Standard Citrix UPM with platform subfolders
 
 ```json
 "ProfileSources": [{
     "Name": "Citrix UPM Share",
-    "Enabled": true,
-    "ProfileRoot": "\\\\fs\\Profiles",
+    "ProfileRoot": "\\\\fs01\\Profiles",
+    "PatternProfile": "*",
     "DaysToDelete": 90,
+    "SkipNewUserFolders": false,
     "EnableQuarantine": true,
-    "QuarantinePath": "\\\\fs\\Quarantine",
-    "QuarantineDays": 30
+    "QuarantinePath": "\\\\fs01\\Quarantine",
+    "QuarantineDays": 30,
+    "MaxProfileScanDepth": 2,
+    "ProfileIndicators": ["UPM_Profile\\NTUSER.DAT", "NTUSER.DAT", "UPMSettings.ini"]
 }]
 ```
 
-### 2. Delete Microsoft Roaming profiles for disabled AD users immediately (no quarantine)
+### 2. Microsoft Roaming profiles directly in user folders
 
 ```json
-"EnableQuarantine": false,
-"ActiveDirectory": { "Enabled": true }
+"ProfileSources": [{
+    "Name": "Roaming Profiles",
+    "ProfileRoot": "\\\\fs02\\RoamingProfiles",
+    "PatternProfile": "*",
+    "DaysToDelete": 60,
+    "SkipNewUserFolders": false,
+    "EnableQuarantine": false,
+    "MaxProfileScanDepth": 0,
+    "ProfileIndicators": ["NTUSER.DAT"]
+}]
 ```
 
-### 3. Test mode for a new source
+### 3. Mixed environment with Folder Redirection and orphan reporting
 
-Set `"TestMode": true` in `GeneralSettings` and run the script. Review the logs and the HTML report to see what would happen.
+```json
+"ProfileSources": [{
+    "Name": "Mixed Environment",
+    "ProfileRoot": "\\\\fs03\\Users",
+    "PatternProfile": "*",
+    "DaysToDelete": 120,
+    "SkipNewUserFolders": true,
+    "EnableQuarantine": true,
+    "QuarantinePath": "\\\\fs03\\Quarantine",
+    "QuarantineDays": 14,
+    "MaxProfileScanDepth": 3,
+    "FolderRedirectionPaths": [
+        "\\\\fs03\\Redirected\\Documents",
+        "\\\\fs03\\Redirected\\Desktop"
+    ],
+    "ProcessOrphanedFR": "ReportOnly",
+    "ActionOnMissingNTUserDat": "Ignore",
+    "ActionOnTooSmallNTUserDat": "Quarantine",
+    "UseFallbackAgeWhenNTUserMissing": true,
+    "FallbackAgeSource": "Auto"
+}]
+```
+
+*In this example, `SkipNewUserFolders = true` prevents processing recently created user folders unless `ActionOnTooSmallNTUserDat` is `Quarantine` – in that case even a new folder with an undersized `NTUSER.DAT` would be processed.*
+
+### 4. Deeply nested custom profile structure
+
+Suppose profiles are stored as:
+```
+\\server\share\username\Profiles\V2\NTUSER.DAT
+```
+Configuration:
+```json
+"MaxProfileScanDepth": 3,
+"ProfileIndicators": ["Profiles\\V2\\NTUSER.DAT"]
+```
+
+## Usage
+
+```powershell
+.\Remove-OldProfiles.ps1                       # Use default config file
+.\Remove-OldProfiles.ps1 -ConfigFile prod.json # Custom config
+```
+
+Always run with `"TestMode": true` first to review planned actions.
 
 ## Troubleshooting
 
-| Issue | Possible solution |
-|-------|-------------------|
-| Script cannot access network share | Ensure the account running the script has read/write permissions on the UNC path. |
-| Active Directory queries fail | Verify that the AD module is installed and the domain is reachable. Use `FQDNDomain` to target a specific domain controller. |
-| Profiles are not being detected | Check `PatternProfile` and `ExcludeFolders`. Enable `DetailedLogging` to see why folders are skipped. |
-| Email not sent | Confirm SMTP server, port, and firewall settings. Check credentials if required. |
-| Quarantine folder not created | The script creates the folder automatically if it does not exist. Ensure the parent path is accessible. |
-
-## Best Practices
-
-- **Always test** with `TestMode = true` before running in production.
-- Use a dedicated service account with least privilege (read/write on profile shares, read-only for AD).
-- Regularly review logs and quarantine folders.
-- Consider scheduling the script via Task Scheduler with appropriate credentials.
+| Issue | Solution |
+|-------|----------|
+| Profiles not detected | Increase `MaxProfileScanDepth` or adjust `ProfileIndicators`. Enable `DetailedLogging` to see scan results. |
+| Duplicate profiles detected | Check that indicators are not being matched in subfolders of already identified profiles. The script stops scanning a branch after a profile is found. If duplicates persist, verify `ProfileIndicators` are specific enough. |
+| Access denied | Ensure the account has read/write permissions on the share. Long paths are supported via `\\?\UNC\` prefix. |
+| Email not sent | Verify SMTP settings and network connectivity. |
 
 ## License
 
-This script is provided as‑is under the MIT License. Feel free to modify and distribute.
+MIT License – feel free to modify and distribute.
